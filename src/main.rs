@@ -21,7 +21,7 @@ use hayate_kit::style::widget_theme_presets::app::app_theme_hayate_original;
 use hayate_kit::style::widget_theme_presets::titlebar::titlebar_theme_hayate_original;
 use hayate_kit::widget::form_layout::FormLayout;
 use hayate_kit::widget::label::LabelWidget;
-use hayate_kit::widget::layout::HStack;
+use hayate_kit::widget::split_view::{SplitOrientation, SplitViewWidget};
 use hayate_kit::widget::tree_view::{TreeNode, TreeViewWidget};
 use hayate_kit::{App, Widget, HAYATE_ORIGINAL};
 
@@ -126,14 +126,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_app_theme(app_theme_hayate_original())
         .with_min_size(560, 400);
 
-    // Phase 1 step 6 skeleton: HStack { Sidebar (TreeView nav) + Detail pane }
-    // - Sidebar = fixed natural width (TreeView 自体の preferred size)
-    // - Detail pane = remaining width (= add_flex(1.0))
+    // Phase 1 step 6 skeleton: SplitView { Sidebar (TreeView nav) + Detail pane }
+    // HStack ではなく SplitView を使用する理由 (= R13 fix 後 visual re-verify で発覚):
+    // TreeView::layout() は constraints.max_width を常に claim する design、
+    // HStack::add(child=flex 0) は unbounded constraint を渡すため TreeView が
+    // infinity 占有 → detail pane 0px。 SplitView は ratio + min_sizes 経路で
+    // proportional split を保証、 sidebar と detail 両方 visible に。
     let sidebar = build_sidebar(strings);
     let detail = build_detail(strings);
-    let root = HStack::new(0.0)
-        .add(Box::new(sidebar))
-        .add_flex(detail, 1.0);
+    let root = SplitViewWidget::new(Box::new(sidebar), detail, SplitOrientation::Horizontal)
+        .with_ratio(0.3) // sidebar = 30%、 detail = 70%
+        .with_min_sizes(180.0, 400.0); // sidebar 最低 180px、 detail 最低 400px
 
     app.run(Box::new(root))
 }
