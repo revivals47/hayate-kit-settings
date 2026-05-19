@@ -78,6 +78,12 @@ struct OverlayBinding {
     state: State<bool>,
     /// 前回 sync 時に観測した値 (= 差分検出で show/hide forward を最小化)。
     last_observed: bool,
+    /// Enter key 押下時の Ok 系 button click と同等 action (= e.g. accent picker の
+    /// Apply、 reset confirm の Reset)。 None なら Enter は単純 dismiss と等価。
+    /// closure 自体が state.<modal>_visible.set(false) を呼ぶ責務を負う (= 既存
+    /// apply_accent_picker / apply_reset_confirm は内部で set(false) するので、
+    /// 同 helper を直接 wrap する形で渡せば自動 dismiss)。
+    on_enter: Option<Box<dyn FnMut()>>,
 }
 
 /// Thin reactive wrapper around [`OverlayContainer`].
@@ -112,7 +118,7 @@ impl ReactiveOverlayContainer {
         }
     }
 
-    /// Add an overlay slot bound to a `State<bool>` source。
+    /// Add an overlay slot bound to a `State<bool>` source (= Enter handler なし)。
     ///
     /// initial state が true なら即 inner.show_overlay 同期。 同 id を 2 回
     /// 登録すると inner 側で重複登録になる + binding が 2 個出来るので、
@@ -124,7 +130,42 @@ impl ReactiveOverlayContainer {
         position: OverlayPosition,
         visible_state: State<bool>,
     ) {
-        let id = id.into();
+        self.add_overlay_internal(id.into(), widget, position, visible_state, None);
+    }
+
+    /// Add an overlay slot with both a `State<bool>` visibility source and an
+    /// Enter-key action closure (= Ok 系 button click と同等 result 担当)。
+    ///
+    /// `on_enter` は Enter / KP_Enter キー押下時に最上位 visible binding として
+    /// 起動された場合に 1 回呼ばれ、 通常は内部で `apply_*` action helper を
+    /// 呼ぶ。 既存 helper (= `apply_accent_picker` / `apply_reset_confirm`) は
+    /// 自身で `state.<modal>_visible.set(false)` を呼ぶため、 closure が helper
+    /// を呼べば自動 dismiss + action という二重 result が成立する。
+    pub(crate) fn add_overlay_with_state_and_enter(
+        &mut self,
+        id: impl Into<String>,
+        widget: Box<dyn Widget>,
+        position: OverlayPosition,
+        visible_state: State<bool>,
+        on_enter: impl FnMut() + 'static,
+    ) {
+        self.add_overlay_internal(
+            id.into(),
+            widget,
+            position,
+            visible_state,
+            Some(Box::new(on_enter)),
+        );
+    }
+
+    fn add_overlay_internal(
+        &mut self,
+        id: String,
+        widget: Box<dyn Widget>,
+        position: OverlayPosition,
+        visible_state: State<bool>,
+        on_enter: Option<Box<dyn FnMut()>>,
+    ) {
         self.inner.add_overlay(id.clone(), widget, position);
         let initial = *visible_state.get();
         if initial {
@@ -134,6 +175,7 @@ impl ReactiveOverlayContainer {
             id,
             state: visible_state,
             last_observed: initial,
+            on_enter,
         });
     }
 
@@ -179,6 +221,38 @@ impl ReactiveOverlayContainer {
         }
         false
     }
+
+    /// Accept (= Enter key) the topmost visible overlay (if any)。
+    ///
+    /// Escape (= dismiss_topmost_visible) と対称構造。 binding に on_enter
+    /// closure が登録されていればそれを起動 (= Ok 系 button click と同等 action、
+    /// 例: apply_accent_picker / apply_reset_confirm)、 closure 自身が
+    /// state.set(false) を呼ぶ責務を持つ。 on_enter 未登録なら単純 dismiss
+    /// (= state.set(false) + inner.hide_overlay) に fallback。
+    ///
+    /// 返り値: visible binding が見つかって 1 件処理した場合 true、 全 hidden
+    /// なら false (= Enter を吸わない、 base layer に届く)。
+    pub(crate) fn accept_topmost_visible(&mut self) -> bool {
+        for binding in self.bindings.iter_mut().rev() {
+            if *binding.state.get() {
+                if let Some(cb) = binding.on_enter.as_mut() {
+                    cb();
+                    // on_enter closure が state.set(false) を呼ぶ前提だが、
+                    // 安全側で last_observed を即時 false 同期 (= 次 sync
+                    // が no-op になる、 closure が set(false) 呼ばない場合は
+                    // 次 frame の sync で逆方向 show が起きる = 設計通り)。
+                    binding.last_observed = false;
+                    self.inner.hide_overlay(&binding.id);
+                } else {
+                    binding.state.set(false);
+                    binding.last_observed = false;
+                    self.inner.hide_overlay(&binding.id);
+                }
+                return true;
+            }
+        }
+        false
+    }
 }
 
 impl Widget for ReactiveOverlayContainer {
@@ -198,17 +272,20 @@ impl Widget for ReactiveOverlayContainer {
 
     fn event(&mut self, event: &WidgetEvent) -> EventResponse {
         self.sync_bindings();
-        // Escape pre-intercept (= 最上位 visible binding を dismiss)。
-        // keysym のみ判定、 state (Pressed/Released) は無視 = idempotent dismiss
-        // で release event 二重発火しても無害 (= hide_overlay も State.set(false)
-        // も冪等)。 hayate_platform::platform::keyboard::KeyState は hayate-kit
-        // から re-export されておらず、 KeyState::Pressed 比較は本 layer から
-        // unreachable のため、 keysym only 判定を採用。
-        if let WidgetEvent::Key(ke) = event
-            && ke.keysym == xkbcommon::xkb::Keysym::Escape
-            && self.dismiss_topmost_visible()
-        {
-            return EventResponse::Handled;
+        // Key pre-intercept (= Escape / Return / KP_Enter)。
+        // keysym のみ判定、 KeyState は再 export 不在のため state filter なし。
+        // idempotent (= release 等で重複発火しても hide/state.set/closure は
+        // 冪等 or 自己責務) のため Pressed limited filter は不要。
+        if let WidgetEvent::Key(ke) = event {
+            let ks = ke.keysym;
+            if ks == xkbcommon::xkb::Keysym::Escape && self.dismiss_topmost_visible() {
+                return EventResponse::Handled;
+            }
+            if (ks == xkbcommon::xkb::Keysym::Return || ks == xkbcommon::xkb::Keysym::KP_Enter)
+                && self.accept_topmost_visible()
+            {
+                return EventResponse::Handled;
+            }
         }
         self.inner.event(event)
     }
@@ -402,10 +479,11 @@ pub fn build_accent_picker(_strings: &'static Strings, state: &AppStateHandles) 
     Box::new(stack)
 }
 
-/// Reset confirm modal (= wave 3b logic-only subset)。
+/// Reset confirm modal (= wave 3b 視覚 wire 完成版、 PRESIDENT Option β 採択)。
 ///
-/// 構造: `VStack { confirm message Label + HStack { Cancel ButtonWidget + Reset
-/// ButtonWidget } }`。
+/// 構造: `VStack { title Label + message Label + HStack { Cancel + Reset } }`。
+/// accent_picker と同 pattern (= VStack 統一、 AlertDialog 不使用) で 2 modal
+/// の visual + 構造 cohesion を確保 (= Option A revision v0.1 → v0.2)。
 ///
 /// ## 配線
 /// - Cancel button on_click: [`cancel_reset_confirm`] で visible flag clear
@@ -414,8 +492,15 @@ pub fn build_accent_picker(_strings: &'static Strings, state: &AppStateHandles) 
 ///   で WARN 出力 + 黙って続行 (= user-visible error toast は別 widget 追加
 ///   必要のため次 wave defer、 disk 書込失敗時も visible flag clear で modal
 ///   は閉じる方針)。
+/// - Escape dismiss: ReactiveOverlayContainer.event() の pre-intercept 経由
+///   (= dismiss_topmost_visible → state.reset_confirm_visible.set(false))。
+///   AlertDialog 内蔵 dismiss は本 modal では不使用 (= VStack 化のため)。
+/// - Enter accept: ReactiveOverlayContainer.event() の Return/KP_Enter
+///   pre-intercept 経由 (= main.rs 側で on_enter closure = apply_reset_confirm
+///   登録、 Ok 系 button click と同等 result)。
 #[allow(dead_code)] // wave 3c 以降 main.rs から呼ばれる
 pub fn build_reset_confirm(_strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widget> {
+    let title = LabelWidget::new("Reset all settings?", 16.0);
     let message = LabelWidget::new(
         "全 settings を default に reset しますか? (この操作は取消不可)",
         14.0,
@@ -440,6 +525,7 @@ pub fn build_reset_confirm(_strings: &'static Strings, state: &AppStateHandles) 
     buttons = buttons.add(Box::new(reset_btn));
 
     let mut stack = VStack::new(16.0);
+    stack = stack.add(Box::new(title));
     stack = stack.add(Box::new(message));
     stack = stack.add(Box::new(buttons));
     Box::new(stack)
@@ -886,6 +972,121 @@ mod tests {
         let external_clone = state.accent_picker_visible.clone();
         roc.dismiss_topmost_visible();
         assert!(!*external_clone.get(), "別 clone 経由でも dismiss 結果が観測可");
+    }
+
+    /// accept_topmost_visible() = on_enter closure が registered なら invoke
+    /// (= closure が state.set(false) と Ok 系 action を担当)。 全 hidden なら false。
+    #[test]
+    fn reactive_overlay_accept_invokes_on_enter_closure() {
+        use std::cell::Cell;
+        use std::rc::Rc as StdRc;
+
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        let mut roc = ReactiveOverlayContainer::new(Box::new(TestStub::new(1)));
+
+        let invocation_count = StdRc::new(Cell::new(0));
+        let count_clone = StdRc::clone(&invocation_count);
+        let state_for_closure = state.clone();
+        roc.add_overlay_with_state_and_enter(
+            "accent",
+            Box::new(TestStub::new(2)),
+            OverlayPosition::Center,
+            state.accent_picker_visible.clone(),
+            move || {
+                count_clone.set(count_clone.get() + 1);
+                // closure 自身が state.set(false) を呼ぶ責務 (= 実 usage では
+                // apply_accent_picker / apply_reset_confirm が同等の責務を持つ)。
+                state_for_closure.accent_picker_visible.set(false);
+            },
+        );
+
+        let accepted = roc.accept_topmost_visible();
+        assert!(accepted, "visible binding 有なら true");
+        assert_eq!(invocation_count.get(), 1, "on_enter closure が 1 回呼ばれた");
+        assert!(!*state.accent_picker_visible.get(), "state が dismiss された");
+    }
+
+    /// accept_topmost_visible() = on_enter 不在 binding は dismiss fallback。
+    #[test]
+    fn reactive_overlay_accept_without_on_enter_falls_back_to_dismiss() {
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        let mut roc = ReactiveOverlayContainer::new(Box::new(TestStub::new(1)));
+        roc.add_overlay_with_state(
+            "accent",
+            Box::new(TestStub::new(2)),
+            OverlayPosition::Center,
+            state.accent_picker_visible.clone(),
+        );
+
+        let accepted = roc.accept_topmost_visible();
+        assert!(accepted, "visible binding 有なら true");
+        assert!(
+            !*state.accent_picker_visible.get(),
+            "on_enter 未登録時は fallback で state.set(false)"
+        );
+    }
+
+    /// accept_topmost_visible() = 全 hidden なら no-op + false。
+    #[test]
+    fn reactive_overlay_accept_noop_when_all_hidden() {
+        let state = for_testing();
+        let mut roc = ReactiveOverlayContainer::new(Box::new(TestStub::new(1)));
+        roc.add_overlay_with_state_and_enter(
+            "accent",
+            Box::new(TestStub::new(2)),
+            OverlayPosition::Center,
+            state.accent_picker_visible.clone(),
+            || panic!("hidden 状態で on_enter は呼ばれない"),
+        );
+
+        let accepted = roc.accept_topmost_visible();
+        assert!(!accepted, "全 hidden 時は false");
+    }
+
+    /// accept_topmost_visible() = 末尾 (= 後 add) 優先で 1 件のみ処理。
+    #[test]
+    fn reactive_overlay_accept_picks_last_visible_only() {
+        use std::cell::Cell;
+        use std::rc::Rc as StdRc;
+
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        state.reset_confirm_visible.set(true);
+        let mut roc = ReactiveOverlayContainer::new(Box::new(TestStub::new(1)));
+
+        let accent_fired = StdRc::new(Cell::new(false));
+        let accent_fired_c = StdRc::clone(&accent_fired);
+        let accent_state = state.clone();
+        roc.add_overlay_with_state_and_enter(
+            "accent",
+            Box::new(TestStub::new(2)),
+            OverlayPosition::Center,
+            state.accent_picker_visible.clone(),
+            move || {
+                accent_fired_c.set(true);
+                accent_state.accent_picker_visible.set(false);
+            },
+        );
+        let reset_fired = StdRc::new(Cell::new(false));
+        let reset_fired_c = StdRc::clone(&reset_fired);
+        let reset_state = state.clone();
+        roc.add_overlay_with_state_and_enter(
+            "reset",
+            Box::new(TestStub::new(3)),
+            OverlayPosition::Center,
+            state.reset_confirm_visible.clone(),
+            move || {
+                reset_fired_c.set(true);
+                reset_state.reset_confirm_visible.set(false);
+            },
+        );
+
+        let accepted = roc.accept_topmost_visible();
+        assert!(accepted);
+        assert!(!accent_fired.get(), "accent (= 下層) は触らない");
+        assert!(reset_fired.get(), "reset (= 末尾) のみ accept");
     }
 
     // ── LabelRef shim tests (= dynamic preview/WCAG 配線基盤) ──
