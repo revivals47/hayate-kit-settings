@@ -851,31 +851,63 @@ mod tests {
 
     /// Cancel 押下後、 user 編集 draft は config 現値に re-seed される。
     /// 次回 modal reopen 時に stale draft で誤 Enter accept される race を防ぐ。
+    ///
+    /// 第二 round codex 強化反映 (= PR #8 review): 「current config に戻す」
+    /// vs 「Config::default() に戻す」を判別可能化するため、 config を
+    /// non-default 値 (例 "#FF0000") に seed してから draft を別値 ("#00FF00") に
+    /// edit して cancel、 assert は **"#FF0000"** (= current config 値、 NOT
+    /// default "#5A8BA8") を期待。 これにより 実装が誤って Config::default の
+    /// accent_hex で re-seed すると test fail する fixation 強化。
     #[test]
     fn cancel_after_draft_edit_reseeds_draft_to_config() {
         let state = for_testing();
-        // baseline: draft == config (= Config::default 経由)
-        let initial = state.config.get().appearance.accent_hex.clone();
-        assert_eq!(*state.draft_accent_hex.get(), initial);
+        let default_hex = Config::default().appearance.accent_hex.clone();
 
-        // user 編集を simulate (= TextInput::on_change で draft のみ更新)
+        // step 1: config を non-default 値に seed (= "current config" を明示化)
+        let current_config_hex = String::from("#FF0000");
+        assert_ne!(
+            current_config_hex, default_hex,
+            "test fixation 前提: seed 値は Config::default と異なる"
+        );
+        state
+            .config
+            .update(|c| c.appearance.accent_hex = current_config_hex.clone());
+
+        // step 2: draft を更に別値に edit (= TextInput::on_change で draft のみ更新 simulate)
         state.accent_picker_visible.set(true);
-        state.draft_accent_hex.set(String::from("#DEADBE"));
-        assert_eq!(*state.draft_accent_hex.get(), "#DEADBE", "draft 編集反映");
+        let edited_draft = String::from("#00FF00");
+        assert_ne!(
+            edited_draft, current_config_hex,
+            "test fixation 前提: draft 編集値は config 値と異なる"
+        );
+        assert_ne!(
+            edited_draft, default_hex,
+            "test fixation 前提: draft 編集値は Config::default 値とも異なる"
+        );
+        state.draft_accent_hex.set(edited_draft.clone());
+        assert_eq!(*state.draft_accent_hex.get(), edited_draft, "draft 編集反映");
         assert_eq!(
             state.config.get().appearance.accent_hex,
-            initial,
+            current_config_hex,
             "config は draft 編集中も touch されない"
         );
 
-        // Cancel 押下相当
+        // step 3: Cancel 押下相当
         cancel_accent_picker(&state);
 
-        // verify: draft が config 現値 (= initial) に re-seed
+        // step 4: draft が **current config 値** に re-seed (= NOT Config::default 値)
         assert_eq!(
             *state.draft_accent_hex.get(),
-            initial,
-            "Cancel で draft が config 現値に re-seed"
+            current_config_hex,
+            "Cancel で draft が current config 値 ({}) に re-seed されること \
+             (= 誤って Config::default 値 ({}) で re-seed する実装は本 assert で fail)",
+            current_config_hex,
+            default_hex
+        );
+        assert_ne!(
+            *state.draft_accent_hex.get(),
+            default_hex,
+            "明示否定: draft は Config::default 値に戻らない (= current config 値が source of truth)"
         );
         assert!(!*state.accent_picker_visible.get(), "modal 閉じる");
     }
