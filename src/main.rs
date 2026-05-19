@@ -13,12 +13,16 @@
 //! `workspace/president-notes/hayate-kit-settings-rfc-v0.1.md` v0.3
 //! (GUI_kit repo 内、Phase 0 spec)
 
+mod lang;
+
 // 規範整合性: `use hayate_kit::...` のみ、`use hayate_platform::...` 禁止
 use clap::Parser;
 use hayate_kit::style::widget_theme_presets::app::app_theme_hayate_original;
 use hayate_kit::style::widget_theme_presets::titlebar::titlebar_theme_hayate_original;
 use hayate_kit::widget::label::LabelWidget;
 use hayate_kit::{App, HAYATE_ORIGINAL};
+
+use crate::lang::Lang;
 
 /// Settings panel for hayate-kit, an embedded GUI framework.
 #[derive(Parser, Debug)]
@@ -28,6 +32,11 @@ struct Cli {
     /// R12 mitigation for bricked state、RFC v0.2 §5.1 deliverable 7 mandatory)
     #[arg(long)]
     reset_config: bool,
+
+    /// UI language override (ja | en、case-insensitive)。
+    /// Unset → LANG env var auto-detect (= ja_JP.UTF-8 → ja、その他 → en)
+    #[arg(long)]
+    lang: Option<String>,
 }
 
 /// Resolve XDG_CONFIG_HOME/hayate-kit-settings/config.json path with
@@ -44,15 +53,16 @@ fn config_path() -> std::path::PathBuf {
 
 /// Safe boot mode action: rename existing config to .bak then report path,
 /// exit without GUI launch (= R12 mitigation per RFC v0.2 §6.1)
-fn reset_config() -> Result<(), Box<dyn std::error::Error>> {
+fn reset_config(lang: Lang) -> Result<(), Box<dyn std::error::Error>> {
+    let strings = lang.strings();
     let cfg = config_path();
     if cfg.exists() {
         let backup = cfg.with_extension("json.bak");
         std::fs::rename(&cfg, &backup)?;
-        println!("Reset config: {}", cfg.display());
-        println!("Backup saved: {}", backup.display());
+        println!("{}: {}", strings.reset_config_done, cfg.display());
+        println!("{}: {}", strings.reset_config_backup, backup.display());
     } else {
-        println!("Config not found (already in default state): {}", cfg.display());
+        println!("{}: {}", strings.reset_config_not_found, cfg.display());
     }
     Ok(())
 }
@@ -60,28 +70,30 @@ fn reset_config() -> Result<(), Box<dyn std::error::Error>> {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    // Safe boot mode: reset + early exit (= bricked state recovery、GUI launch
-    // 前に config 削除で次回起動時 default state 復帰)
+    // Lang resolution: CLI override (= --lang ja|en) が最優先、不在時 LANG env
+    // 自動検出 fallback (= [[feedback_new_apps_depend_on_gui_kit_only]] 規範整合の
+    // minimal i18n、外部 crate 依存なし)
+    let lang = Lang::from_cli(cli.lang.as_deref()).unwrap_or_else(Lang::detect);
+    let strings = lang.strings();
+
+    // Safe boot mode: reset + early exit
     if cli.reset_config {
-        return reset_config();
+        return reset_config(lang);
     }
 
     // Normal launch: App builder chain = HAYATE Original 3-builder
-    let app = App::new("hayate-kit-settings — HAYATE Original prototype", 720, 480)
+    let app = App::new(strings.app_title, 720, 480)
         .with_theme(&HAYATE_ORIGINAL)
         .with_titlebar_theme(titlebar_theme_hayate_original())
         .with_app_theme(app_theme_hayate_original())
         .with_min_size(480, 320);
 
-    // Phase 1 minimal placeholder = single-line Label。
+    // Phase 1 minimal placeholder = single-line Label
     // explicit .with_color() で HAYATE_ORIGINAL.fg_primary を override
     // (= LabelWidget::new() default は HAYATE_DARK.fg_primary hardcoded = light grey、
-    // warm light bg では invisible。framework limitation、RFC v0.3 R13 debt 登録済)。
-    let placeholder = LabelWidget::new(
-        "HAYATE Original visual prototype  /  風藍 accent #5A8BA8",
-        14.0,
-    )
-    .with_color(42, 41, 37); // text-primary #2A2925
+    // warm light bg では invisible。framework limitation、RFC v0.3 R13 debt 登録済)
+    let placeholder = LabelWidget::new(strings.placeholder_text, 14.0)
+        .with_color(42, 41, 37); // text-primary #2A2925
 
     app.run(Box::new(placeholder))
 }
