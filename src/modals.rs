@@ -47,21 +47,28 @@ const DEFAULT_ACCENT_RGB: (u8, u8, u8) = (90, 139, 168);
 /// HAYATE Original default surface-raised RGB (= `#FFFFFF`)。
 const DEFAULT_SURFACE_RGB: (u8, u8, u8) = (255, 255, 255);
 
-/// Accent color picker modal (= wave 2 fill 完遂)。
+/// Accent color picker modal (= wave 2 fill + wave 3b hex 永続化 wire)。
 ///
 /// 構造: `VStack { hex TextInput + preview swatch Label + WCAG ratio Label }`。
-/// wave 3 で hex 入力 → reactive bind → preview swatch / WCAG ratio dynamic 更新を
-/// 配線予定 (= 現状は default `#5A8BA8` 風藍 vs `#FFFFFF` surface で静的計算)。
+/// wave 3b で hex 入力 → [`apply_accent_hex_change`] (= state.config.update +
+/// debouncer.request) を [`TextInputWidget::on_change`] で配線。preview swatch /
+/// WCAG ratio の dynamic 再計算は別途 reactive observer / shared widget handle
+/// 設計が必要で本 wave 外、 現状 default `#5A8BA8` 風藍 vs `#FFFFFF` surface の
+/// 静的計算表示は継続。
 /// ## wave 3a signature 拡張
-/// `_state: &AppStateHandles` を受け取るのは wave 3b で hex TextInput take_changed
-/// poll → state.config.update + WCAG ratio dynamic 再計算、 Apply ボタン on_click →
-/// state.accent_picker_visible.set(false) を配線するため。
+/// `_state: &AppStateHandles` を受け取るのは wave 3b で hex TextInput on_change →
+/// state.config.update を配線するため。Apply ボタン on_click →
+/// state.accent_picker_visible.set(false) は別 dispatch (modal lifecycle wave) で land 予定。
 #[allow(dead_code)] // wave 3 で main.rs / appearance.rs から呼ばれる
-pub fn build_accent_picker(_strings: &'static Strings, _state: &AppStateHandles) -> Box<dyn Widget> {
-    // hex 入力 (= default 風藍を placeholder 提示)。 wave 3 で on_change wire。
+pub fn build_accent_picker(_strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widget> {
+    // hex 入力 (= default 風藍を placeholder 提示)、on_change で persistence wire。
     let hex_input = TextInputWidget::new()
         .with_placeholder(DEFAULT_ACCENT_HEX)
-        .with_width(160.0);
+        .with_width(160.0)
+        .on_change({
+            let state = state.clone();
+            move |text| apply_accent_hex_change(&state, text)
+        });
 
     // preview swatch (= 固定 default 風藍 hex code の text 表示で代替、
     // actual user-input parse + dynamic color fill rect は wave 3 dep)。
@@ -126,6 +133,20 @@ pub fn build_reset_confirm(_strings: &'static Strings, _state: &AppStateHandles)
     stack = stack.add(Box::new(message));
     stack = stack.add(Box::new(buttons));
     Box::new(stack)
+}
+
+// ── wave 3b on_change wire helper ───────────────────────────────────
+
+/// hex TextInput `on_change` の反映: 入力 text を
+/// `config.appearance.accent_hex` へ書き、debouncer を request 起動。
+/// `sections/appearance.rs::apply_accent_hex_change` と論理同一だが、
+/// 既存の private helper duplicate pattern (= 下の WCAG helper) と整合させ
+/// 各 file 内に閉じた helper として保持。
+fn apply_accent_hex_change(state: &AppStateHandles, text: &str) {
+    state
+        .config
+        .update(|c| c.appearance.accent_hex = text.to_owned());
+    state.debouncer.borrow().request();
 }
 
 // ── WCAG helper local duplicate (= sections/appearance.rs 内 helper が private
@@ -194,5 +215,15 @@ mod tests {
         let l_k = relative_luminance(0, 0, 0);
         let r = contrast_ratio(l_w, l_k);
         assert!((r - 21.0).abs() < 0.001);
+    }
+
+    // ── wave 3b on_change wire ─────────────────────────────────────────
+
+    #[test]
+    fn accent_hex_change_propagates_and_requests_save() {
+        let state = crate::state::for_testing();
+        apply_accent_hex_change(&state, "#3D6884");
+        assert_eq!(state.config.get().appearance.accent_hex, "#3D6884");
+        assert!(state.debouncer.borrow().has_pending());
     }
 }
