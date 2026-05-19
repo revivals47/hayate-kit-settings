@@ -43,4 +43,87 @@ impl SectionId {
     pub const fn default() -> Self {
         SectionId::General
     }
+
+    /// Map a `TreeView` selection path (= `Vec<usize>` of nested indices) to
+    /// the corresponding `SectionId`。
+    ///
+    /// Sidebar TreeView node layout (= main.rs `build_sidebar`):
+    /// - `[0]` = General
+    /// - `[1]` = Appearance (root) — falls through to `Appearance` itself
+    /// - `[1, 0]` = Appearance → Theme sub-node → `Appearance`
+    /// - `[1, 1]` = Appearance → Font sub-node → `Appearance`
+    /// - `[1, 2]` = Appearance → Color sub-node → `Appearance`
+    /// - `[2]` = Accessibility
+    /// - `[3]` = IME
+    /// - `[4]` = Advanced
+    ///
+    /// Empty / out-of-range paths return `None` so caller can fall back
+    /// (e.g. keep current selection rather than panic). All Appearance sub-
+    /// nodes resolve to `SectionId::Appearance` since the detail pane builds
+    /// a unified Appearance page in wave 3b (= sub-node granularity is
+    /// reserved for wave 4 scroll-to-anchor).
+    ///
+    /// ## DTP reuse
+    /// Identical path → enum mapping pattern (= `match path.first()` +
+    /// guarded sub-index) is reusable for DTP app preference dialog
+    /// (= per-style / per-paragraph hierarchical settings)。
+    #[allow(dead_code)] // wave 3b で main.rs TreeView on_select callback で使用化
+    pub fn from_tree_path(path: &[usize]) -> Option<Self> {
+        match path.first()? {
+            0 => Some(SectionId::General),
+            1 => Some(SectionId::Appearance), // root + any sub-node
+            2 => Some(SectionId::Accessibility),
+            3 => Some(SectionId::Ime),
+            4 => Some(SectionId::Advanced),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_tree_path_root_indices() {
+        assert_eq!(SectionId::from_tree_path(&[0]), Some(SectionId::General));
+        assert_eq!(SectionId::from_tree_path(&[1]), Some(SectionId::Appearance));
+        assert_eq!(SectionId::from_tree_path(&[2]), Some(SectionId::Accessibility));
+        assert_eq!(SectionId::from_tree_path(&[3]), Some(SectionId::Ime));
+        assert_eq!(SectionId::from_tree_path(&[4]), Some(SectionId::Advanced));
+    }
+
+    #[test]
+    fn from_tree_path_appearance_sub_nodes_all_resolve_to_appearance() {
+        assert_eq!(SectionId::from_tree_path(&[1, 0]), Some(SectionId::Appearance));
+        assert_eq!(SectionId::from_tree_path(&[1, 1]), Some(SectionId::Appearance));
+        assert_eq!(SectionId::from_tree_path(&[1, 2]), Some(SectionId::Appearance));
+    }
+
+    #[test]
+    fn from_tree_path_empty_returns_none() {
+        assert_eq!(SectionId::from_tree_path(&[]), None);
+    }
+
+    #[test]
+    fn from_tree_path_out_of_range_returns_none() {
+        // 5 root sections (indices 0..=4); 5 and beyond are invalid
+        assert_eq!(SectionId::from_tree_path(&[5]), None);
+        assert_eq!(SectionId::from_tree_path(&[99]), None);
+    }
+
+    #[test]
+    fn from_tree_path_non_appearance_root_with_subpath_still_resolves() {
+        // Defensive: only Appearance root has sub-nodes in current layout,
+        // but if a non-Appearance root somehow receives a sub-path index
+        // (e.g. via TreeView API misuse), still resolve to that root's
+        // SectionId rather than None — the first index is authoritative.
+        assert_eq!(SectionId::from_tree_path(&[0, 7]), Some(SectionId::General));
+        assert_eq!(SectionId::from_tree_path(&[4, 99]), Some(SectionId::Advanced));
+    }
+
+    #[test]
+    fn default_is_general() {
+        assert_eq!(SectionId::default(), SectionId::General);
+    }
 }
