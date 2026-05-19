@@ -101,10 +101,13 @@ fn build_sidebar(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn 
     // TreeView nav 選択 → state.selected_section.set で reactive 配線
     // (= wave 3b worker3 dispatch、 DetailContainerWidget が version polling で
     // 検出 → 該当 section の widget tree に rebuild)。
-    // 空 path / 範囲外 path は default = General に fallback (panic 回避)。
+    // 空 path / 範囲外 path は **現在の selection を維持** (= panic 回避 + UX:
+    // 異常 path 押下で detail pane が default = General に強制リセットされる
+    // 不自然さを排除、 codex PR #9 finding 3 反映)。
     let nav_state = state.clone();
     let tree = TreeViewWidget::new(nodes).on_select(move |path| {
-        let sid = SectionId::from_tree_path(&path).unwrap_or(SectionId::default());
+        let current = *nav_state.selected_section.get();
+        let sid = SectionId::from_tree_path(&path).unwrap_or(current);
         nav_state.selected_section.set(sid);
     });
 

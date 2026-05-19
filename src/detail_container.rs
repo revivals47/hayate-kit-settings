@@ -29,8 +29,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use hayate_kit::{
-    alloc_widget_id, Constraints, EventResponse, ItemRect, Renderer, Size, TextEngine, Widget,
-    WidgetEvent, WidgetId,
+    alloc_widget_id, AppTheme, Constraints, EventResponse, ItemRect, Renderer, Size, TextEngine,
+    Widget, WidgetEvent, WidgetId,
 };
 
 use crate::sections::SectionId;
@@ -53,6 +53,12 @@ pub struct DetailContainerWidget {
     inner: Box<dyn Widget>,
     /// `inject_engine` で受け取った engine の保持、 rebuild 後 inner への再注入用。
     cached_engine: Option<Rc<RefCell<TextEngine>>>,
+    /// `inject_theme` で受け取った AppTheme の保持、 rebuild 後 inner への再注入用
+    /// (= PR #157 で hayate-kit 経由 AppTheme re-export 解禁、 規範準拠 path)。
+    /// engine と同様に App から widget tree に 1 回だけ注入される one-shot
+    /// なので、 cache せず単純 forward すると rebuild 後の新 inner が theme 未注入
+    /// → focus ring / button color が default に脱落する regression が発生する。
+    cached_theme: Option<Rc<AppTheme>>,
     /// AppStateHandles clone (= 各 section / search / modal と共有)。
     state: AppStateHandles,
     /// section → widget tree 構築 closure (= main.rs 側で strings capture)。
@@ -80,6 +86,7 @@ impl DetailContainerWidget {
             cached_state_version,
             inner,
             cached_engine: None,
+            cached_theme: None,
             state,
             build: Box::new(build),
             id: alloc_widget_id(),
@@ -98,8 +105,15 @@ impl DetailContainerWidget {
         let sid = *self.state.selected_section.get();
         let new_inner = (self.build)(sid, &self.state);
         self.inner = new_inner;
+        // engine + theme は App から widget tree に 1 回だけ注入される one-shot
+        // のため、 rebuild 後の新 inner には初期注入が届かない。 cached_engine /
+        // cached_theme から再注入することで rebuild 越しに visual parity を維持
+        // (= focus ring / button color / font の脱落を防ぐ)。
         if let Some(eng) = self.cached_engine.as_ref() {
             self.inner.inject_engine(Rc::clone(eng));
+        }
+        if let Some(theme) = self.cached_theme.as_ref() {
+            self.inner.inject_theme(Rc::clone(theme));
         }
         self.cached_section = sid;
         self.cached_state_version = v;
@@ -138,13 +152,23 @@ impl Widget for DetailContainerWidget {
         self.inner.inject_engine(engine);
     }
 
+    fn inject_theme(&mut self, theme: Rc<AppTheme>) {
+        // engine と同 pattern: App は theme を 1 回しか注入しないため、 rebuild
+        // 後の新 inner にも届けるよう Rc を保持して再注入できるよう cache。
+        // (PR #157 hayate-kit::AppTheme re-export 解禁で hayate_platform 直 use
+        // 回避 + override 経路成立、 case 7 framework gap root-fix 反映。)
+        self.cached_theme = Some(Rc::clone(&theme));
+        self.inner.inject_theme(theme);
+    }
+
     fn id(&self) -> WidgetId {
         self.id
     }
 
     /// 単一 inner を slice 1 件として expose、 default impl の paint_overlay /
-    /// event_overlay / inject_theme / popup_request / on_popup_dismissed /
-    /// on_drag_finished / paint_popup forward を inner に到達させる。
+    /// event_overlay / popup_request / on_popup_dismissed / on_drag_finished /
+    /// paint_popup forward を inner に到達させる。 inject_engine / inject_theme
+    /// は cache 保持要件で本 widget 側 override 済 (= rebuild 後 inner への再注入)。
     fn children(&self) -> &[Box<dyn Widget>] {
         std::slice::from_ref(&self.inner)
     }
@@ -252,5 +276,95 @@ mod tests {
         state.selected_section.set(SectionId::General);
         let _ = container.layout(&Constraints::unbounded());
         assert_eq!(build_count.get(), 2);
+    }
+
+    /// `inject_theme` で受け取った `AppTheme` が cached_theme 経由で rebuild 後
+    /// の新 inner にも再注入されることを確認 (= codex PR #9 finding 1 real bug
+    /// fix regression test)。
+    ///
+    /// 「App は theme を 1 回しか注入しない」 invariant に対して、 SectionId
+    /// 切替で widget tree が rebuild されると新 inner は theme 未注入状態で
+    /// 生成される。 cached_theme なしの単純 forward では新 inner の focus ring /
+    /// button color / font が default に脱落する regression が発生する。
+    /// cached_theme で Rc 保持 + rebuild_if_changed 内 inject_theme 再呼出で
+    /// この regression を防いでいることを probe widget の flip flag で観察。
+    #[test]
+    fn rebuild_preserves_theme_injection() {
+        use std::cell::Cell;
+
+        // 各 build 呼出で「最新 inner の theme_injected flag」 を slot に書く。
+        // 初期 inner と rebuild 後 inner で別 Rc instance であることを ptr_eq で
+        // 確認しつつ、 両者で flag が set されたことを別個に観察する。
+        let state = crate::state::for_testing();
+        let latest_flag: Rc<RefCell<Option<Rc<Cell<bool>>>>> = Rc::new(RefCell::new(None));
+        let slot = Rc::clone(&latest_flag);
+        let build = move |_sid: SectionId, _s: &AppStateHandles| -> Box<dyn Widget> {
+            let flag = Rc::new(Cell::new(false));
+            *slot.borrow_mut() = Some(Rc::clone(&flag));
+            Box::new(ThemeProbeWidget::new(flag))
+        };
+        let mut container = DetailContainerWidget::new(state.clone(), build);
+
+        // 初期 inner の flag を snapshot (= rebuild 後 ptr_eq 比較用)
+        let initial_flag = latest_flag
+            .borrow()
+            .as_ref()
+            .map(Rc::clone)
+            .expect("initial inner was constructed");
+        assert!(!initial_flag.get(), "初期段階で inject_theme 未呼出");
+
+        // App.inject_theme → 初期 inner に theme forward 確認 (= 既存 path、 cache 保持)
+        let theme = Rc::new(AppTheme::default());
+        container.inject_theme(Rc::clone(&theme));
+        assert!(initial_flag.get(), "container.inject_theme で初期 inner にも theme 到達");
+
+        // SectionId 切替 → layout 経由で rebuild
+        state.selected_section.set(SectionId::Advanced);
+        let _ = container.layout(&Constraints::unbounded());
+
+        // 新 inner の flag = 別 Rc instance、 かつ cached_theme 経由で再注入確認
+        let new_flag = latest_flag
+            .borrow()
+            .as_ref()
+            .map(Rc::clone)
+            .expect("rebuilt inner was constructed");
+        assert!(
+            !Rc::ptr_eq(&initial_flag, &new_flag),
+            "rebuild 後の inner は別 widget instance"
+        );
+        assert!(
+            new_flag.get(),
+            "cached_theme 経由で rebuild 後の新 inner にも theme 再注入"
+        );
+    }
+
+    /// `inject_theme` 呼出を probe するための test 専用 widget。
+    /// `theme_injected` flag を `inject_theme` 内で set する以外は no-op、
+    /// rebuild 越しに theme 注入の到達を観察するのみに特化。
+    struct ThemeProbeWidget {
+        id: WidgetId,
+        theme_injected: Rc<std::cell::Cell<bool>>,
+    }
+
+    impl ThemeProbeWidget {
+        fn new(theme_injected: Rc<std::cell::Cell<bool>>) -> Self {
+            Self {
+                id: alloc_widget_id(),
+                theme_injected,
+            }
+        }
+    }
+
+    impl Widget for ThemeProbeWidget {
+        fn layout(&mut self, _c: &Constraints) -> Size {
+            Size::zero()
+        }
+        fn paint(&mut self, _r: &mut Renderer, _rect: ItemRect) {}
+        fn inject_theme(&mut self, _theme: Rc<AppTheme>) {
+            self.theme_injected.set(true);
+        }
+        fn id(&self) -> WidgetId {
+            self.id
+        }
     }
 }
