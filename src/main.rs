@@ -24,6 +24,7 @@ use clap::Parser;
 use hayate_kit::style::widget_theme_presets::app::app_theme_hayate_original;
 use hayate_kit::style::widget_theme_presets::titlebar::titlebar_theme_hayate_original;
 use hayate_kit::widget::default_chrome::build_systemlike;
+use hayate_kit::widget::layout::VStack;
 use hayate_kit::widget::split_view::{SplitOrientation, SplitViewWidget};
 use hayate_kit::widget::tree_view::{TreeNode, TreeViewWidget};
 use hayate_kit::{App, Decorations, Widget, WindowPolicy, HAYATE_ORIGINAL};
@@ -73,10 +74,13 @@ fn reset_config(lang: Lang) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Sidebar TreeView nav = 5 root sections + Appearance sub-tree (3 sub-nodes)。
-/// Phase 1 skeleton stub = navigation のみ、 select callback は未配線 (= Phase 2 で
-/// section selected を reactive bind して detail pane swap)。
-fn build_sidebar(strings: &'static Strings) -> TreeViewWidget {
+/// Sidebar = Search bar (上) + TreeView nav (下) を VStack で積む構成
+/// (= Phase 2 wave 2 batch 3 で拡張、 RFC v0.5 §5.2.7 search bar integration)。
+///
+/// TreeView nav = 5 root sections + Appearance sub-tree (3 sub-nodes)。
+/// select callback / search filter → selection 更新 reactive bind は wave 3
+/// integration dep、 本 wave 2 では widget composition のみ。
+fn build_sidebar(strings: &'static Strings) -> Box<dyn Widget> {
     let nodes = vec![
         TreeNode::new(strings.section_general),
         TreeNode::new(strings.section_appearance).with_children(vec![
@@ -88,7 +92,12 @@ fn build_sidebar(strings: &'static Strings) -> TreeViewWidget {
         TreeNode::new(strings.section_ime),
         TreeNode::new(strings.section_advanced),
     ];
-    TreeViewWidget::new(nodes)
+    let tree = TreeViewWidget::new(nodes);
+
+    let mut stack = VStack::new(8.0);
+    stack = stack.add(search::build(strings));
+    stack = stack.add(Box::new(tree));
+    Box::new(stack)
 }
 
 /// Detail pane = selected section の widget tree (= Phase 2 wave 0 scaffolding)。
@@ -157,7 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // proportional split を保証、 sidebar と detail 両方 visible に。
     let sidebar = build_sidebar(strings);
     let detail = build_detail(strings, sections::SectionId::default());
-    let root = SplitViewWidget::new(Box::new(sidebar), detail, SplitOrientation::Horizontal)
+    let root = SplitViewWidget::new(sidebar, detail, SplitOrientation::Horizontal)
         .with_ratio(0.3) // sidebar = 30%、 detail = 70%
         .with_min_sizes(180.0, 400.0); // sidebar 最低 180px、 detail 最低 400px
 
