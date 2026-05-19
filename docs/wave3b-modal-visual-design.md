@@ -533,3 +533,29 @@ DialogKind::Question + on_result callback で State<bool> sync)
   - 回避策: inject_theme default impl (= children_mut() empty で no-op) で十分
     (= hayate-kit-settings は HAYATE_ORIGINAL theme + cosmic-text path 使用、
     bitmap_default 未注入でも paint 正常)
+
+## 11. accent_picker modal trigger 配線状態 (= wave 3c dispatch 予定 dormant infrastructure)
+
+wave 3b で land した modal infrastructure (= AlertDialogContainer 置換の
+ReactiveOverlayContainer + accent_picker / reset_confirm overlay 配置 + Escape /
+Enter / on_enter closure + OverlayContainer 経由 visibility + dimming) は
+**production code path から trigger されない dormant state** で land する。
+
+- **accent_picker modal trigger** (= `state.accent_picker_visible.set(true)`):
+  本 wave 3b では production code 内に呼出 site なし。 既存 inline TextInput
+  accent_hex 編集 path (= `sections/appearance.rs:84-89` 周辺) で wave 3b 基本
+  編集 path は充足するため、 modal trigger は visual color picker (= swatch
+  preview + WCAG live re-eval) 用途で別 dispatch (= wave 3c) で配線予定。
+- **reset_confirm modal trigger** (= `state.reset_confirm_visible.set(true)`):
+  同じく wave 3c dispatch 予定。 wave 3b では advanced section の reset button
+  callback wire を含めず、 modal 表示 trigger 未配線。
+- **test coverage 確保**: trigger 未配線でも infrastructure 自体は cargo test
+  77 + 2 (= 79) で全 path 検証済。 wave 3c で trigger 配線時に既存 test 不変
+  維持で integration verify 可能 (= contract preserved)。
+- **rationale**: wave 3b dispatch ETA 圧縮 (= ETA 元 120 min 維持)、 trigger
+  配線 + visual picker UX 整備 + section button 周辺 affordance は wave 3c で
+  集中 dispatch、 wave 3b は infrastructure land + 動的 preview/WCAG/Escape/Enter
+  validation までを scope 確定。
+- **後世への trail**: 「なぜ modal infrastructure が land 済なのに使えないか」
+  と疑問を持った後世 reader は、 本 §11 + git log で wave 3c dispatch 履歴を
+  参照のこと (= dormant 期間中の re-discover 可能化)。

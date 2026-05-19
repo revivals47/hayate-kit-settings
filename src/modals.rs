@@ -382,8 +382,16 @@ pub(crate) fn apply_accent_picker(state: &AppStateHandles, hex: &str) {
 
 /// Dismiss accent picker modal without applying the draft hex (= state.config
 /// 不変)。
+///
+/// 末尾で `draft_accent_hex` を `state.config.appearance.accent_hex` に re-seed
+/// する。 これにより user が cancel した編集分は次回 modal reopen 時に表示
+/// されず、 stale draft で誤って Enter accept される race が解消される
+/// (= PR #8 codex 査読 real bug fix、 inline TextInput 経由 accent_hex 変更後
+/// に modal 経由再編集する path も同 re-seed で current 値 reflect)。
 pub(crate) fn cancel_accent_picker(state: &AppStateHandles) {
     state.accent_picker_visible.set(false);
+    let current = state.config.get().appearance.accent_hex.clone();
+    state.draft_accent_hex.set(current);
 }
 
 /// Reset Config to defaults + persist immediately + dismiss reset confirm modal。
@@ -396,6 +404,10 @@ pub(crate) fn apply_reset_confirm(state: &AppStateHandles) -> std::io::Result<()
     persistence::reset(&state.config_path)?;
     state.config.set(persistence::Config::default());
     state.reset_confirm_visible.set(false);
+    // draft_accent_hex も default に同期 (= PR #8 codex 査読 real bug fix)。
+    // reset 後の accent_picker reopen 時に旧 draft (= user 編集途中値) が見え
+    // ないように、 config と一致する default value で reseed する。
+    state.draft_accent_hex.set(persistence::Config::default().appearance.accent_hex);
     Ok(())
 }
 
@@ -833,6 +845,70 @@ mod tests {
             !*state.reset_confirm_visible.get(),
             "Cancel reset must dismiss modal"
         );
+    }
+
+    // ── PR #8 codex 査読 real bug fix: draft_accent_hex re-seed regression ──
+
+    /// Cancel 押下後、 user 編集 draft は config 現値に re-seed される。
+    /// 次回 modal reopen 時に stale draft で誤 Enter accept される race を防ぐ。
+    #[test]
+    fn cancel_after_draft_edit_reseeds_draft_to_config() {
+        let state = for_testing();
+        // baseline: draft == config (= Config::default 経由)
+        let initial = state.config.get().appearance.accent_hex.clone();
+        assert_eq!(*state.draft_accent_hex.get(), initial);
+
+        // user 編集を simulate (= TextInput::on_change で draft のみ更新)
+        state.accent_picker_visible.set(true);
+        state.draft_accent_hex.set(String::from("#DEADBE"));
+        assert_eq!(*state.draft_accent_hex.get(), "#DEADBE", "draft 編集反映");
+        assert_eq!(
+            state.config.get().appearance.accent_hex,
+            initial,
+            "config は draft 編集中も touch されない"
+        );
+
+        // Cancel 押下相当
+        cancel_accent_picker(&state);
+
+        // verify: draft が config 現値 (= initial) に re-seed
+        assert_eq!(
+            *state.draft_accent_hex.get(),
+            initial,
+            "Cancel で draft が config 現値に re-seed"
+        );
+        assert!(!*state.accent_picker_visible.get(), "modal 閉じる");
+    }
+
+    /// Reset confirm 適用後、 draft_accent_hex は Config::default の accent_hex
+    /// に re-seed される。 reset 後に accent_picker reopen 時、 旧 user 編集
+    /// draft が見えないことを保証。
+    #[test]
+    fn reset_clears_draft_to_default() {
+        let (state, path) = isolated_state("reset-draft");
+
+        // seed: config + draft 両方を non-default に
+        state.config.update(|c| {
+            c.appearance.accent_hex = String::from("#FFCC00");
+        });
+        state.draft_accent_hex.set(String::from("#ABCDEF"));
+        state.reset_confirm_visible.set(true);
+
+        // act: Reset 押下相当
+        apply_reset_confirm(&state).expect("reset succeeds");
+
+        // verify: draft が Config::default の accent_hex に re-seed
+        let default_accent = Config::default().appearance.accent_hex;
+        assert_eq!(
+            *state.draft_accent_hex.get(),
+            default_accent,
+            "Reset で draft が default に re-seed"
+        );
+        // verify: config も default 復元 (= 既存 path、 regression check)
+        assert_eq!(state.config.get().appearance.accent_hex, default_accent);
+        assert!(!*state.reset_confirm_visible.get());
+
+        cleanup_state(&path);
     }
 
     // 6. Visible flag は Apply / Cancel いずれの path でも必ず false に落ちる
