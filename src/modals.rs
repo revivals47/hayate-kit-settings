@@ -327,60 +327,67 @@ pub(crate) fn cancel_reset_confirm(state: &AppStateHandles) {
     state.reset_confirm_visible.set(false);
 }
 
-// ── widget composition (= wave 3b logic-only、 視覚 lifecycle は次 wave) ──
+// ── widget composition (= wave 3b 視覚 wire 完成、 動的 preview/WCAG 配線済) ──
 
-/// Accent color picker modal (= wave 3b logic-only subset)。
+/// Accent color picker modal (= wave 3b 視覚 wire 完成版)。
 ///
 /// 構造: `VStack { hex TextInput + preview swatch Label + WCAG ratio Label +
 /// HStack { Cancel ButtonWidget + Apply ButtonWidget } }`。
 ///
-/// ## 配線
+/// ## 配線 (= wave 3b visual layer)
+/// - hex TextInput.on_change: 入力ごとに [`parse_hex_or_default`] で RGB 抽出、
+///   [`update_preview_text`] で preview label を更新、 [`compute_wcag_status`]
+///   で WCAG ratio を再計算して wcag label を更新、 さらに state.draft_accent_hex
+///   に raw 文字列を保存 (= Apply 押下時の commit 元)
 /// - Cancel button on_click: [`cancel_accent_picker`] で visible flag clear
-/// - Apply button on_click: 現状 `DEFAULT_ACCENT_HEX` 固定で [`apply_accent_picker`]
-///   を呼出 (= TextInput live text 読出は framework PR (= `TextInput::on_change`
-///   callback + hayate_kit から `TextEngine` re-export) 完了後、 次 wave で
-///   `state.draft_accent_hex: State<String>` 等を追加して動的 hex 反映予定)
-/// - preview / WCAG label は default 値で静的構築 (= 動的再計算は同上理由 defer)
+/// - Apply button on_click: state.draft_accent_hex から raw 文字列を読出して
+///   [`apply_accent_picker`] に渡す (= 動的 hex 反映、 DEFAULT_ACCENT_HEX 固定 placeholder 廃止)
+/// - preview / WCAG label は [`LabelRef::new_pair`] 経由 Rc<RefCell> 共有 mutate 配線
 #[allow(dead_code)] // wave 3c 以降 main.rs から呼ばれる
 pub fn build_accent_picker(_strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widget> {
+    // initial preview / WCAG label content (= state.draft_accent_hex 現値 base)
+    let initial_hex = state.draft_accent_hex.get().clone();
+    let (ir, ig, ib) = parse_hex_or_default(&initial_hex);
+    let preview_label = LabelWidget::new(update_preview_text(&initial_hex, ir, ig, ib), 13.0);
+    let wcag_label = LabelWidget::new(compute_wcag_status(&initial_hex, ir, ig, ib), 12.0);
+
+    // LabelRef shim 経由で Widget tree 投入 widget と外部 mutate handle を分離。
+    // handle clone は on_change closure が capture、 widget は VStack に投入。
+    let (preview_widget, preview_handle) = LabelRef::new_pair(preview_label);
+    let (wcag_widget, wcag_handle) = LabelRef::new_pair(wcag_label);
+
+    // TextInput::on_change closure (= PR #155 公開 API、 入力 mutation 経路毎に発火)。
+    // 各 frame の paint 内 set_text 呼出が dirty flag を立て、 framework が次 frame
+    // で repaint trigger。 ReactiveOverlayContainer 配下 layout は overlay slot
+    // cached_size 経由で text 拡張に追従 (= 文字列長変化で auto reflow)。
+    let on_change_state = state.clone();
+    let preview_for_change = Rc::clone(&preview_handle);
+    let wcag_for_change = Rc::clone(&wcag_handle);
     let hex_input = TextInputWidget::new()
         .with_placeholder(DEFAULT_ACCENT_HEX)
-        .with_width(160.0);
+        .with_width(160.0)
+        .on_change(move |new_text: &str| {
+            let (r, g, b) = parse_hex_or_default(new_text);
+            preview_for_change
+                .borrow_mut()
+                .set_text(&update_preview_text(new_text, r, g, b));
+            wcag_for_change
+                .borrow_mut()
+                .set_text(&compute_wcag_status(new_text, r, g, b));
+            on_change_state.draft_accent_hex.set(new_text.to_string());
+        });
 
-    let preview = LabelWidget::new(
-        format!("Preview swatch: {} (default 風藍)", DEFAULT_ACCENT_HEX),
-        13.0,
-    );
-
-    let (r, g, b) = DEFAULT_ACCENT_RGB;
-    let (sr, sg, sb) = DEFAULT_SURFACE_RGB;
-    let ratio = contrast_ratio(relative_luminance(r, g, b), relative_luminance(sr, sg, sb));
-    let aa_pass = ratio >= 4.5;
-    let wcag_note = format!(
-        "WCAG AA (>=4.5:1): {} vs surface = {} -- {} [dynamic re-eval: next wave]",
-        DEFAULT_ACCENT_HEX,
-        format_ratio(ratio),
-        if aa_pass {
-            "PASS"
-        } else {
-            "FAIL: pick a darker / lighter accent"
-        },
-    );
-    let wcag_label = LabelWidget::new(wcag_note, 12.0);
-
-    // Cancel + Apply buttons の closure に state clone を capture (= Rc 内部
-    // 共有、 cheap clone)。 wave 3c では Apply に user-input hex を渡す経路を
-    // framework PR 完了後に追加予定 (= 現状 DEFAULT_ACCENT_HEX 固定で placeholder)。
     let cancel_state = state.clone();
     let cancel_btn = ButtonWidget::new("Cancel").on_click(move || {
         cancel_accent_picker(&cancel_state);
     });
     let apply_state = state.clone();
     let apply_btn = ButtonWidget::new("Apply").on_click(move || {
-        // FIXME(next wave): TextInput live text 読出は framework PR 完了後
-        // (= TextInput::on_change callback + custom Widget impl 可) に追加。
-        // 現状 default hex 固定で apply、 visible flag clear のみ実用化。
-        apply_accent_picker(&apply_state, DEFAULT_ACCENT_HEX);
+        // draft_accent_hex 経由 user input 反映 (= wave 3b 視覚 wire で動的化、
+        // DEFAULT_ACCENT_HEX 固定 placeholder は廃止)。 draft は on_change で
+        // 都度更新済、 ここでは現値 snapshot を取って apply_accent_picker に転送。
+        let draft = apply_state.draft_accent_hex.get().clone();
+        apply_accent_picker(&apply_state, &draft);
     });
 
     let mut buttons = HStack::new(12.0);
@@ -389,8 +396,8 @@ pub fn build_accent_picker(_strings: &'static Strings, state: &AppStateHandles) 
 
     let mut stack = VStack::new(8.0);
     stack = stack.add(Box::new(hex_input));
-    stack = stack.add(Box::new(preview));
-    stack = stack.add(Box::new(wcag_label));
+    stack = stack.add(preview_widget);
+    stack = stack.add(wcag_widget);
     stack = stack.add(Box::new(buttons));
     Box::new(stack)
 }
@@ -461,6 +468,72 @@ fn contrast_ratio(la: f32, lb: f32) -> f32 {
 /// `4.7321 -> "4.73:1"` 等。 contrast ratio 表示用。
 fn format_ratio(r: f32) -> String {
     format!("{:.2}:1", r)
+}
+
+/// `#RRGGBB` を parse して `(r, g, b)` を返す。 形式不正なら DEFAULT_ACCENT_RGB
+/// (= 風藍) を返す (= 無効入力中も preview を fallback でレンダー継続、 user に
+/// 「無効」表示で feedback)。
+///
+/// validation 仕様: 先頭 `#` + 6 文字 hex (case-insensitive)。 短縮形式
+/// (#RGB) や `0x` prefix は accept しない (= 仕様シンプル化、 wave 3c 以降で
+/// reactive hex parser を強化予定)。
+fn parse_hex_or_default(hex: &str) -> (u8, u8, u8) {
+    if !is_valid_hex(hex) {
+        return DEFAULT_ACCENT_RGB;
+    }
+    let r = u8::from_str_radix(&hex[1..3], 16).unwrap_or(DEFAULT_ACCENT_RGB.0);
+    let g = u8::from_str_radix(&hex[3..5], 16).unwrap_or(DEFAULT_ACCENT_RGB.1);
+    let b = u8::from_str_radix(&hex[5..7], 16).unwrap_or(DEFAULT_ACCENT_RGB.2);
+    (r, g, b)
+}
+
+/// `#RRGGBB` 形式チェック (= 先頭 `#` + 6 hex digit、 case-insensitive)。
+fn is_valid_hex(hex: &str) -> bool {
+    let bytes = hex.as_bytes();
+    bytes.len() == 7
+        && bytes[0] == b'#'
+        && bytes[1..].iter().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Preview swatch Label の表示文字列を構成。 valid 時は hex 表記 + 風藍呼称、
+/// invalid 時は fallback indication を付与 (= user 即座に format error を認知可)。
+fn update_preview_text(hex: &str, _r: u8, _g: u8, _b: u8) -> String {
+    if is_valid_hex(hex) {
+        format!("Preview swatch: {}", hex)
+    } else {
+        format!(
+            "Preview swatch: {} (invalid hex → fallback {})",
+            hex, DEFAULT_ACCENT_HEX
+        )
+    }
+}
+
+/// WCAG ratio status Label の表示文字列を構成。 入力 RGB と DEFAULT_SURFACE_RGB
+/// (= `#FFFFFF`) との contrast ratio を計算、 AA threshold (4.5:1) 比較で
+/// PASS/FAIL 判定 + 推奨 hint を付与。
+fn compute_wcag_status(hex: &str, r: u8, g: u8, b: u8) -> String {
+    let (sr, sg, sb) = DEFAULT_SURFACE_RGB;
+    let ratio = contrast_ratio(
+        relative_luminance(r, g, b),
+        relative_luminance(sr, sg, sb),
+    );
+    let aa_pass = ratio >= 4.5;
+    let verdict = if aa_pass {
+        "PASS"
+    } else {
+        "FAIL: pick a darker / lighter accent"
+    };
+    let display_hex = if is_valid_hex(hex) {
+        hex.to_string()
+    } else {
+        format!("{} (using fallback {})", hex, DEFAULT_ACCENT_HEX)
+    };
+    format!(
+        "WCAG AA (>=4.5:1): {} vs surface = {} -- {}",
+        display_hex,
+        format_ratio(ratio),
+        verdict,
+    )
 }
 
 #[cfg(test)]
@@ -850,5 +923,97 @@ mod tests {
         assert!(!handle.borrow().dirty(), "clear_dirty 後 dirty=false");
         handle.borrow_mut().set_text("dirty trigger");
         assert!(handle.borrow().dirty(), "set_text 後 dirty=true (= 再 paint trigger)");
+    }
+
+    // ── hex parser + WCAG helpers tests (= dynamic preview/WCAG 内訳) ──
+
+    #[test]
+    fn is_valid_hex_recognizes_canonical_form() {
+        assert!(is_valid_hex("#5A8BA8"));
+        assert!(is_valid_hex("#000000"));
+        assert!(is_valid_hex("#FFFFFF"));
+        assert!(is_valid_hex("#abcdef"), "lowercase OK");
+        assert!(is_valid_hex("#AbCdEf"), "mixed case OK");
+    }
+
+    #[test]
+    fn is_valid_hex_rejects_invalid_forms() {
+        assert!(!is_valid_hex(""), "empty");
+        assert!(!is_valid_hex("5A8BA8"), "missing #");
+        assert!(!is_valid_hex("#5A8"), "short");
+        assert!(!is_valid_hex("#5A8BA8FF"), "too long (alpha unsupported)");
+        assert!(!is_valid_hex("#GGGGGG"), "non-hex digit");
+        assert!(!is_valid_hex("#5A 8BA"), "embedded space");
+    }
+
+    #[test]
+    fn parse_hex_or_default_returns_canonical_value() {
+        assert_eq!(parse_hex_or_default("#5A8BA8"), (90, 139, 168));
+        assert_eq!(parse_hex_or_default("#000000"), (0, 0, 0));
+        assert_eq!(parse_hex_or_default("#FFFFFF"), (255, 255, 255));
+        assert_eq!(parse_hex_or_default("#abcdef"), (0xab, 0xcd, 0xef));
+    }
+
+    #[test]
+    fn parse_hex_or_default_falls_back_on_invalid() {
+        assert_eq!(parse_hex_or_default(""), DEFAULT_ACCENT_RGB);
+        assert_eq!(parse_hex_or_default("#GGGGGG"), DEFAULT_ACCENT_RGB);
+        assert_eq!(parse_hex_or_default("badtext"), DEFAULT_ACCENT_RGB);
+    }
+
+    #[test]
+    fn update_preview_text_marks_invalid_as_fallback() {
+        let valid = update_preview_text("#5A8BA8", 90, 139, 168);
+        assert!(valid.contains("#5A8BA8"), "valid hex echoed");
+        assert!(!valid.contains("fallback"), "valid path に fallback 表示なし");
+
+        let invalid = update_preview_text("garbage", 0, 0, 0);
+        assert!(invalid.contains("garbage"), "raw input echoed");
+        assert!(invalid.contains("invalid hex"), "invalid 状態を表示");
+        assert!(
+            invalid.contains(DEFAULT_ACCENT_HEX),
+            "fallback hex 名示"
+        );
+    }
+
+    #[test]
+    fn compute_wcag_status_pass_or_fail_branch() {
+        // 風藍 vs #FFFFFF surface = ~3.6:1 → AA FAIL (= 推奨 darker accent)
+        let s_default = compute_wcag_status("#5A8BA8", 90, 139, 168);
+        assert!(s_default.contains("FAIL"), "default 風藍 vs 白 surface は FAIL");
+
+        // 黒 vs #FFFFFF = max contrast (21:1) → AA PASS
+        let s_black = compute_wcag_status("#000000", 0, 0, 0);
+        assert!(s_black.contains("PASS"), "黒 vs 白 surface は PASS");
+        assert!(s_black.contains("21.00:1"), "ratio 表示確認");
+    }
+
+    // ── on_change 配線結合テスト (= build_accent_picker 経由 closure 経路) ──
+
+    /// build_accent_picker 構築後、 draft_accent_hex を直接 set すると後続の
+    /// Apply path で commit される (= closure capture と State<String> 共有確認)。
+    #[test]
+    fn build_accent_picker_apply_uses_draft_hex() {
+        let state = for_testing();
+        let _root = build_accent_picker(Lang::En.strings(), &state);
+        // 直接 draft を仕込んでから apply (= on_change closure simulation)
+        state.draft_accent_hex.set(String::from("#3D6884"));
+        // Apply button on_click closure を直接呼ぶ手段はないので、
+        // 代替 = apply_accent_picker(state, &draft) を直接呼出して同等性を verify
+        let draft_snapshot = state.draft_accent_hex.get().clone();
+        apply_accent_picker(&state, &draft_snapshot);
+        assert_eq!(state.config.get().appearance.accent_hex, "#3D6884");
+    }
+
+    /// build_accent_picker 構築直後の draft_accent_hex は state.config 由来の
+    /// initial value と一致 (= AppStateHandles::new の draft_accent_hex 同期と整合)。
+    #[test]
+    fn build_accent_picker_draft_matches_state_initial() {
+        let state = for_testing();
+        // state.draft_accent_hex の initial は Config::default().appearance.accent_hex
+        // = "#5A8BA8"。 build_accent_picker 自体は draft を mutate しない (=
+        // initial read のみ)、 構築後も draft は initial 維持。
+        let _root = build_accent_picker(Lang::En.strings(), &state);
+        assert_eq!(*state.draft_accent_hex.get(), "#5A8BA8");
     }
 }
