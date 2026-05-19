@@ -19,10 +19,13 @@ mod lang;
 use clap::Parser;
 use hayate_kit::style::widget_theme_presets::app::app_theme_hayate_original;
 use hayate_kit::style::widget_theme_presets::titlebar::titlebar_theme_hayate_original;
+use hayate_kit::widget::form_layout::FormLayout;
 use hayate_kit::widget::label::LabelWidget;
-use hayate_kit::{App, HAYATE_ORIGINAL};
+use hayate_kit::widget::layout::HStack;
+use hayate_kit::widget::tree_view::{TreeNode, TreeViewWidget};
+use hayate_kit::{App, Widget, HAYATE_ORIGINAL};
 
-use crate::lang::Lang;
+use crate::lang::{Lang, Strings};
 
 /// Settings panel for hayate-kit, an embedded GUI framework.
 #[derive(Parser, Debug)]
@@ -67,12 +70,47 @@ fn reset_config(lang: Lang) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Sidebar TreeView nav = 5 root sections + Appearance sub-tree (3 sub-nodes)。
+/// Phase 1 skeleton stub = navigation のみ、 select callback は未配線 (= Phase 2 で
+/// section selected を reactive bind して detail pane swap)。
+fn build_sidebar(strings: &'static Strings) -> TreeViewWidget {
+    let nodes = vec![
+        TreeNode::new(strings.section_general),
+        TreeNode::new(strings.section_appearance).with_children(vec![
+            TreeNode::new(strings.section_appearance_theme),
+            TreeNode::new(strings.section_appearance_font),
+            TreeNode::new(strings.section_appearance_color),
+        ]),
+        TreeNode::new(strings.section_accessibility),
+        TreeNode::new(strings.section_ime),
+        TreeNode::new(strings.section_advanced),
+    ];
+    TreeViewWidget::new(nodes)
+}
+
+/// Detail pane = "General" section の placeholder FormLayout (= Phase 1 stub)。
+/// Phase 2 で section selected の reactive bind + 各 section の form 内容を
+/// 順次 implementation。
+fn build_detail(strings: &'static Strings) -> Box<dyn Widget> {
+    // FormLayout に "Coming soon" placeholder field を 1 row。
+    // label widget は HAYATE_DARK fg hardcoded 既知 limitation ([[R13]])、
+    // explicit .with_color() で text-primary override (= 風韻 warm dark)
+    let coming_soon = LabelWidget::new(strings.coming_soon, 14.0).with_color(42, 41, 37);
+    let heading = LabelWidget::new(strings.section_general, 18.0).with_color(42, 41, 37);
+    let form = FormLayout::new().row(strings.section_general, coming_soon);
+
+    // VStack { heading + form } で section heading の上に form
+    use hayate_kit::widget::layout::VStack;
+    let mut stack = VStack::new(16.0); // space-md per RFC §3.4
+    stack = stack.add(Box::new(heading));
+    stack = stack.add(Box::new(form));
+    Box::new(stack)
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    // Lang resolution: CLI override (= --lang ja|en) が最優先、不在時 LANG env
-    // 自動検出 fallback (= [[feedback_new_apps_depend_on_gui_kit_only]] 規範整合の
-    // minimal i18n、外部 crate 依存なし)
+    // Lang resolution: CLI override が最優先、不在時 LANG env 自動検出 fallback
     let lang = Lang::from_cli(cli.lang.as_deref()).unwrap_or_else(Lang::detect);
     let strings = lang.strings();
 
@@ -82,18 +120,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Normal launch: App builder chain = HAYATE Original 3-builder
-    let app = App::new(strings.app_title, 720, 480)
+    let app = App::new(strings.app_title, 800, 540)
         .with_theme(&HAYATE_ORIGINAL)
         .with_titlebar_theme(titlebar_theme_hayate_original())
         .with_app_theme(app_theme_hayate_original())
-        .with_min_size(480, 320);
+        .with_min_size(560, 400);
 
-    // Phase 1 minimal placeholder = single-line Label
-    // explicit .with_color() で HAYATE_ORIGINAL.fg_primary を override
-    // (= LabelWidget::new() default は HAYATE_DARK.fg_primary hardcoded = light grey、
-    // warm light bg では invisible。framework limitation、RFC v0.3 R13 debt 登録済)
-    let placeholder = LabelWidget::new(strings.placeholder_text, 14.0)
-        .with_color(42, 41, 37); // text-primary #2A2925
+    // Phase 1 step 6 skeleton: HStack { Sidebar (TreeView nav) + Detail pane }
+    // - Sidebar = fixed natural width (TreeView 自体の preferred size)
+    // - Detail pane = remaining width (= add_flex(1.0))
+    let sidebar = build_sidebar(strings);
+    let detail = build_detail(strings);
+    let root = HStack::new(0.0)
+        .add(Box::new(sidebar))
+        .add_flex(detail, 1.0);
 
-    app.run(Box::new(placeholder))
+    app.run(Box::new(root))
 }

@@ -86,6 +86,20 @@ pub struct Strings {
     // CLI flag descriptions (= clap doc help、--reset-config / --lang)
     pub cli_reset_config_desc: &'static str,
     pub cli_lang_desc: &'static str,
+
+    // Settings panel section labels (= Phase 1 step 6 skeleton extend、
+    // TreeView nav + Detail pane heading 用)
+    pub section_general: &'static str,
+    pub section_appearance: &'static str,
+    pub section_appearance_theme: &'static str,
+    pub section_appearance_font: &'static str,
+    pub section_appearance_color: &'static str,
+    pub section_accessibility: &'static str,
+    pub section_ime: &'static str,
+    pub section_advanced: &'static str,
+
+    // Detail pane stub messages
+    pub coming_soon: &'static str,
 }
 
 impl Strings {
@@ -102,6 +116,15 @@ impl Strings {
         cli_reset_config_desc:
             "Safe boot モード: 設定ファイルを .bak へ rename + GUI 起動せず exit (= R12 mitigation = bricked state 復旧 path)",
         cli_lang_desc: "UI 言語の指定 (ja | en、デフォルトは LANG 環境変数から検出)",
+        section_general: "一般",
+        section_appearance: "外観",
+        section_appearance_theme: "テーマ",
+        section_appearance_font: "フォント",
+        section_appearance_color: "アクセント色",
+        section_accessibility: "アクセシビリティ",
+        section_ime: "入力 (IME)",
+        section_advanced: "詳細設定",
+        coming_soon: "実装予定 (Phase 2 で section 内容を順次 land)",
     };
 
     /// English localized strings。
@@ -117,6 +140,15 @@ impl Strings {
         cli_reset_config_desc:
             "Safe boot mode: rename config file to .bak and exit without GUI launch (= R12 mitigation = bricked state recovery path)",
         cli_lang_desc: "UI language (ja | en, default detected from LANG env var)",
+        section_general: "General",
+        section_appearance: "Appearance",
+        section_appearance_theme: "Theme",
+        section_appearance_font: "Font",
+        section_appearance_color: "Accent Color",
+        section_accessibility: "Accessibility",
+        section_ime: "Input (IME)",
+        section_advanced: "Advanced",
+        coming_soon: "Coming soon (= Phase 2 で section impl land)",
     };
 }
 
