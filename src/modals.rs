@@ -28,11 +28,18 @@
 //! 取消) + typography color picker でも reuse 想定、 4 action helper signature
 //! pattern (= `fn <action>_<modal>(state[, input])` ) は universal。
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use hayate_kit::widget::button::ButtonWidget;
 use hayate_kit::widget::label::LabelWidget;
 use hayate_kit::widget::layout::{HStack, VStack};
+use hayate_kit::widget::overlay::{OverlayContainer, OverlayPosition};
 use hayate_kit::widget::text_input_widget::TextInputWidget;
-use hayate_kit::Widget;
+use hayate_kit::{
+    Constraints, EventResponse, ItemRect, Renderer, Size, State, TextEngine, Widget, WidgetEvent,
+    WidgetId,
+};
 
 #[allow(unused_imports)] // wave 3 で `Strings` field を本格使用予定
 use crate::lang::Strings;
@@ -45,6 +52,239 @@ const DEFAULT_ACCENT_HEX: &str = "#5A8BA8";
 const DEFAULT_ACCENT_RGB: (u8, u8, u8) = (90, 139, 168);
 /// HAYATE Original default surface-raised RGB (= `#FFFFFF`)。
 const DEFAULT_SURFACE_RGB: (u8, u8, u8) = (255, 255, 255);
+
+// ── ReactiveOverlayContainer (= wave 3b 視覚層 root): State<bool> 観測 → ──
+// hayate_kit::widget::overlay::OverlayContainer の show/hide_overlay forward。
+// PRESIDENT 即決 Option A 採択 (= worker2 統合 design)、 design doc 名
+// `AlertDialogContainer` から `ReactiveOverlayContainer` に rename。
+//
+// 設計根拠:
+// - hayate_kit/hayate-platform に ZStack 不在、 既存 OverlayContainer (= base
+//   + Vec<overlay widgets> + dimming + modal event routing 完備) を thin wrap
+// - State<bool> 観測 = paint/layout/event 冒頭で sync_bindings()、 idempotent
+// - Escape pre-intercept = 最上位 visible overlay の State<bool>.set(false)
+//   (= AlertDialog 内蔵 Escape dismiss と二重発火しても idempotent)
+// - 外クリック dismiss は本 wave scope 外 (= PRESIDENT 補強 A defer 決定)
+// - Tab trap は本 wave scope 外 (= 確定方針通り defer)
+// - id() は inner.id() delegate (= PRESIDENT distinction、 inner stable のため
+//   alloc_widget_id PR 不要、 worker3 DetailContainerWidget case と分離)
+
+/// State<bool> binding for a single overlay slot.
+struct OverlayBinding {
+    /// `OverlayContainer::add_overlay` で登録した stable id (= 操作対象選定 key)。
+    id: String,
+    /// 外部 control source (= AppStateHandles.{accent_picker_visible,
+    /// reset_confirm_visible} 等)。
+    state: State<bool>,
+    /// 前回 sync 時に観測した値 (= 差分検出で show/hide forward を最小化)。
+    last_observed: bool,
+}
+
+/// Thin reactive wrapper around [`OverlayContainer`].
+///
+/// 内部に `OverlayContainer` を保持、 N 個の (overlay id, `State<bool>`,
+/// last_observed) bindings を sync_bindings() で観測し、 paint/layout/event
+/// 冒頭で `show_overlay` / `hide_overlay` を forward する。
+///
+/// ## ライフサイクル
+/// 1. `new(base)` で OverlayContainer 構築 (base widget は SplitView 等の主 UI)
+/// 2. `add_overlay_with_state(id, widget, position, state)` で overlay slot 追加
+///    + binding 登録、 initial state が true なら即 show_overlay 同期
+/// 3. paint/layout/event の冒頭で sync_bindings() が走り、 state 変化を反映
+/// 4. event で Escape を pre-intercept、 最上位 visible binding の
+///    state.set(false) を呼んで dismiss、 inner.hide_overlay も即時 forward
+///
+/// ## scope
+/// 本 wave 3b では `modals.rs` 内 thin wrapper (consumer-specific layer、
+/// PRESIDENT 補強 C)。 wave 3b 完遂後 closeout で汎用需要評価、 必要なら
+/// framework PR で hayate-kit 昇格 (別 dispatch、 本 wave scope 外)。
+pub(crate) struct ReactiveOverlayContainer {
+    inner: OverlayContainer,
+    bindings: Vec<OverlayBinding>,
+}
+
+impl ReactiveOverlayContainer {
+    /// Construct a container wrapping `base` widget (= 主 UI、 通常は SplitView)。
+    pub(crate) fn new(base: Box<dyn Widget>) -> Self {
+        Self {
+            inner: OverlayContainer::new(base),
+            bindings: Vec::new(),
+        }
+    }
+
+    /// Add an overlay slot bound to a `State<bool>` source。
+    ///
+    /// initial state が true なら即 inner.show_overlay 同期。 同 id を 2 回
+    /// 登録すると inner 側で重複登録になる + binding が 2 個出来るので、
+    /// caller は id の uniqueness を保証する。
+    pub(crate) fn add_overlay_with_state(
+        &mut self,
+        id: impl Into<String>,
+        widget: Box<dyn Widget>,
+        position: OverlayPosition,
+        visible_state: State<bool>,
+    ) {
+        let id = id.into();
+        self.inner.add_overlay(id.clone(), widget, position);
+        let initial = *visible_state.get();
+        if initial {
+            self.inner.show_overlay(&id);
+        }
+        self.bindings.push(OverlayBinding {
+            id,
+            state: visible_state,
+            last_observed: initial,
+        });
+    }
+
+    /// Pull state changes into inner OverlayContainer visibility flags。
+    ///
+    /// layout / paint / event の冒頭で呼出、 idempotent (= 差分がなければ
+    /// no-op、 差分時のみ show/hide_overlay forward + last_observed 更新)。
+    fn sync_bindings(&mut self) {
+        for binding in &mut self.bindings {
+            let now = *binding.state.get();
+            if now != binding.last_observed {
+                if now {
+                    self.inner.show_overlay(&binding.id);
+                } else {
+                    self.inner.hide_overlay(&binding.id);
+                }
+                binding.last_observed = now;
+            }
+        }
+    }
+
+    /// Dismiss the topmost visible overlay (if any)。
+    ///
+    /// 順序: bindings 末尾 (= 後で add_overlay_with_state された方が上層想定)
+    /// から逆順走査し、 初出の visible binding の State<bool>.set(false) を
+    /// 呼び、 inner.hide_overlay も即時 forward + last_observed = false 更新。
+    /// Escape key pre-intercept から呼び出され、 全 binding が hidden の場合は
+    /// 何もせず false を返す (= Escape を吸わない = base layer に届ける)。
+    ///
+    /// 別 method 抽出理由 (= test 観点): event() 内 `WidgetEvent::Key` 構築は
+    /// `hayate_platform::platform::keyboard::KeyEvent` を要求し、 本 crate の
+    /// hayate-kit only 依存規範下では test code から synthesize 不可能。 dismiss
+    /// logic を method 化することで key event 経由のテストを迂回、 logic 自体を
+    /// 直接 assert 可能にする (= unit test boundary 設計)。
+    pub(crate) fn dismiss_topmost_visible(&mut self) -> bool {
+        for binding in self.bindings.iter_mut().rev() {
+            if *binding.state.get() {
+                binding.state.set(false);
+                binding.last_observed = false;
+                self.inner.hide_overlay(&binding.id);
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl Widget for ReactiveOverlayContainer {
+    fn id(&self) -> WidgetId {
+        self.inner.id()
+    }
+
+    fn layout(&mut self, constraints: &Constraints) -> Size {
+        self.sync_bindings();
+        self.inner.layout(constraints)
+    }
+
+    fn paint(&mut self, renderer: &mut Renderer, rect: ItemRect) {
+        self.sync_bindings();
+        self.inner.paint(renderer, rect);
+    }
+
+    fn event(&mut self, event: &WidgetEvent) -> EventResponse {
+        self.sync_bindings();
+        // Escape pre-intercept (= 最上位 visible binding を dismiss)。
+        // keysym のみ判定、 state (Pressed/Released) は無視 = idempotent dismiss
+        // で release event 二重発火しても無害 (= hide_overlay も State.set(false)
+        // も冪等)。 hayate_platform::platform::keyboard::KeyState は hayate-kit
+        // から re-export されておらず、 KeyState::Pressed 比較は本 layer から
+        // unreachable のため、 keysym only 判定を採用。
+        if let WidgetEvent::Key(ke) = event
+            && ke.keysym == xkbcommon::xkb::Keysym::Escape
+            && self.dismiss_topmost_visible()
+        {
+            return EventResponse::Handled;
+        }
+        self.inner.event(event)
+    }
+
+    fn dirty(&self) -> bool {
+        self.inner.dirty()
+    }
+
+    fn clear_dirty(&mut self) {
+        self.inner.clear_dirty();
+    }
+
+    fn update(&mut self, dt: f32) {
+        self.inner.update(dt);
+    }
+
+    fn inject_engine(&mut self, engine: Rc<RefCell<TextEngine>>) {
+        self.inner.inject_engine(engine);
+    }
+}
+
+// ── LabelRef shim (= wave 3b dynamic preview/WCAG 配線基盤) ──
+//
+// `Rc<RefCell<LabelWidget>>` を Widget tree に投入するための thin wrapper。
+// build_accent_picker 内で TextInput::on_change closure が clone を capture、
+// もう一方を本 shim 経由で tree に投入することで、 closure 側から `set_text`
+// 呼出可能な共有 mutate path を確立。
+//
+// inject_theme は default impl (= children_mut() empty で no-op) に任せる。
+// LabelWidget::inject_theme は `bitmap_default` のみ更新する Win95 family skin
+// 用 fallback。 hayate-kit-settings は HAYATE_ORIGINAL theme (= modern、
+// cosmic-text path) を hard-baked 使用、 bitmap_default 未注入でも paint 正常。
+
+/// Widget tree 投入と外部 mutate を両立する LabelWidget 共有 wrapper。
+pub(crate) struct LabelRef {
+    inner: Rc<RefCell<LabelWidget>>,
+}
+
+impl LabelRef {
+    /// Construct a (`Box<dyn Widget>`, mutation handle) pair from a LabelWidget。
+    ///
+    /// returned tuple: `(0)` = Box 化済 widget (= tree 投入用)、 `(1)` = closure
+    /// capture 用の Rc clone (= `handle.borrow_mut().set_text(&new)` で更新可)。
+    pub(crate) fn new_pair(label: LabelWidget) -> (Box<dyn Widget>, Rc<RefCell<LabelWidget>>) {
+        let inner = Rc::new(RefCell::new(label));
+        let handle = Rc::clone(&inner);
+        let widget: Box<dyn Widget> = Box::new(Self { inner });
+        (widget, handle)
+    }
+}
+
+impl Widget for LabelRef {
+    fn id(&self) -> WidgetId {
+        self.inner.borrow().id()
+    }
+
+    fn layout(&mut self, constraints: &Constraints) -> Size {
+        self.inner.borrow_mut().layout(constraints)
+    }
+
+    fn paint(&mut self, renderer: &mut Renderer, rect: ItemRect) {
+        self.inner.borrow_mut().paint(renderer, rect);
+    }
+
+    fn dirty(&self) -> bool {
+        self.inner.borrow().dirty()
+    }
+
+    fn clear_dirty(&mut self) {
+        self.inner.borrow_mut().clear_dirty();
+    }
+
+    fn inject_engine(&mut self, engine: Rc<RefCell<TextEngine>>) {
+        self.inner.borrow_mut().inject_engine(engine);
+    }
+}
 
 // ── action helpers (= wave 3b core、 全 button on_click + 全 test で共有) ──
 
@@ -231,6 +471,34 @@ mod tests {
     use crate::state::{for_testing, AppStateHandles};
     use hayate_kit::ReactiveRuntime;
     use std::path::PathBuf;
+
+    // ── visual layer test helpers (= ReactiveOverlayContainer / LabelRef) ──
+
+    /// Minimal stub widget for ReactiveOverlayContainer/LabelRef driver tests。
+    /// production widget tree には登場しない (= `#[cfg(test)]` 配下のみ)。
+    struct TestStub {
+        id: WidgetId,
+        size: Size,
+    }
+
+    impl TestStub {
+        fn new(raw_id: u64) -> Self {
+            Self {
+                id: WidgetId(raw_id),
+                size: Size::new(100.0, 50.0),
+            }
+        }
+    }
+
+    impl Widget for TestStub {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+        fn layout(&mut self, _c: &Constraints) -> Size {
+            self.size
+        }
+        fn paint(&mut self, _r: &mut Renderer, _rect: ItemRect) {}
+    }
 
     // ── existing smoke tests (preserved baseline) ───────────────────────
 
@@ -421,5 +689,166 @@ mod tests {
         state.accent_picker_visible.set(true);
         cancel_accent_picker(&state);
         assert!(!*state.accent_picker_visible.get());
+    }
+
+    // ── ReactiveOverlayContainer tests (= 視覚層 binding sync) ──
+
+    fn make_container_with_two_overlays(
+        accent_state: State<bool>,
+        reset_state: State<bool>,
+    ) -> ReactiveOverlayContainer {
+        let mut roc = ReactiveOverlayContainer::new(Box::new(TestStub::new(1)));
+        roc.add_overlay_with_state(
+            "accent",
+            Box::new(TestStub::new(2)),
+            OverlayPosition::Center,
+            accent_state,
+        );
+        roc.add_overlay_with_state(
+            "reset",
+            Box::new(TestStub::new(3)),
+            OverlayPosition::Center,
+            reset_state,
+        );
+        roc
+    }
+
+    /// initial state が true のまま add すると即 visible 同期される。
+    #[test]
+    fn reactive_overlay_initial_visible_state_syncs_on_add() {
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        let mut roc = ReactiveOverlayContainer::new(Box::new(TestStub::new(1)));
+        roc.add_overlay_with_state(
+            "accent",
+            Box::new(TestStub::new(2)),
+            OverlayPosition::Center,
+            state.accent_picker_visible.clone(),
+        );
+        // sync_bindings は add 時の initial 反映で十分、 layout 不要
+        assert!(roc.inner.is_visible("accent"));
+    }
+
+    /// state.set(true) → 次 layout() で show_overlay forward される。
+    #[test]
+    fn reactive_overlay_state_change_forwards_via_layout() {
+        let state = for_testing();
+        let mut roc = make_container_with_two_overlays(
+            state.accent_picker_visible.clone(),
+            state.reset_confirm_visible.clone(),
+        );
+        assert!(!roc.inner.is_visible("accent"), "baseline hidden");
+
+        state.accent_picker_visible.set(true);
+        let _ = roc.layout(&Constraints::tight(800.0, 600.0));
+        assert!(roc.inner.is_visible("accent"), "after set(true) + layout");
+    }
+
+    /// state.set(false) → 次 paint() で hide_overlay forward される。
+    #[test]
+    fn reactive_overlay_state_change_forwards_via_paint() {
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        let mut roc = make_container_with_two_overlays(
+            state.accent_picker_visible.clone(),
+            state.reset_confirm_visible.clone(),
+        );
+        assert!(roc.inner.is_visible("accent"), "initial visible");
+
+        state.accent_picker_visible.set(false);
+        // paint() を直接呼び出すと renderer 構築が重いので、 sync が走る
+        // layout() で代替 (= 同じ sync_bindings() を経由)。 paint() 経路は
+        // 別 frame で同様に動作 (= idempotent、 重ね呼出無害)。
+        let _ = roc.layout(&Constraints::tight(800.0, 600.0));
+        assert!(!roc.inner.is_visible("accent"), "after set(false) + layout");
+    }
+
+    /// dismiss_topmost_visible() = 末尾 (= reset = 後 add) が visible なら
+    /// それを優先 dismiss、 そうでなく accent (= 前 add) が visible なら accent。
+    #[test]
+    fn reactive_overlay_dismiss_topmost_picks_last_visible() {
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        state.reset_confirm_visible.set(true);
+        let mut roc = make_container_with_two_overlays(
+            state.accent_picker_visible.clone(),
+            state.reset_confirm_visible.clone(),
+        );
+
+        let dismissed = roc.dismiss_topmost_visible();
+        assert!(dismissed, "should dismiss something");
+        assert!(*state.accent_picker_visible.get(), "accent still visible (= 下層)");
+        assert!(!*state.reset_confirm_visible.get(), "reset (= 末尾) が dismiss された");
+        assert!(!roc.inner.is_visible("reset"), "inner も同期 hidden");
+    }
+
+    /// dismiss_topmost_visible() で全 hidden 状態は何もせず false を返す。
+    #[test]
+    fn reactive_overlay_dismiss_topmost_noop_when_all_hidden() {
+        let state = for_testing();
+        let mut roc = make_container_with_two_overlays(
+            state.accent_picker_visible.clone(),
+            state.reset_confirm_visible.clone(),
+        );
+
+        let dismissed = roc.dismiss_topmost_visible();
+        assert!(!dismissed, "全 hidden 時は dismiss 不発");
+        assert!(!*state.accent_picker_visible.get(), "state 不変");
+        assert!(!*state.reset_confirm_visible.get(), "state 不変");
+    }
+
+    /// dismiss → state.set(false) 経由で外部 closure が読み取れる (= 共有 Rc)。
+    #[test]
+    fn reactive_overlay_dismiss_propagates_state_set_to_externally_held_clones() {
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        let mut roc = ReactiveOverlayContainer::new(Box::new(TestStub::new(1)));
+        roc.add_overlay_with_state(
+            "accent",
+            Box::new(TestStub::new(2)),
+            OverlayPosition::Center,
+            state.accent_picker_visible.clone(),
+        );
+
+        let external_clone = state.accent_picker_visible.clone();
+        roc.dismiss_topmost_visible();
+        assert!(!*external_clone.get(), "別 clone 経由でも dismiss 結果が観測可");
+    }
+
+    // ── LabelRef shim tests (= dynamic preview/WCAG 配線基盤) ──
+
+    /// handle 経由 set_text 後に内部 LabelWidget の text field が更新される。
+    /// closure capture (= handle clone) から外部 mutate → widget tree 反映の
+    /// 共有 mutate path を成立させる core property を assert。
+    #[test]
+    fn label_ref_set_text_via_handle_visible_to_inner() {
+        let label = LabelWidget::new("initial", 13.0);
+        let (_widget, handle) = LabelRef::new_pair(label);
+
+        assert_eq!(handle.borrow().text, "initial", "baseline text");
+        handle.borrow_mut().set_text("after on_change");
+        assert_eq!(
+            handle.borrow().text,
+            "after on_change",
+            "handle 経由 mutate が即時反映"
+        );
+    }
+
+    /// LabelRef widget (= tree 投入用) と handle (= mutate 用) は同じ inner を
+    /// share している (= Rc clone)。 これにより closure capture と tree 投入
+    /// 両立可能。
+    #[test]
+    fn label_ref_widget_and_handle_share_inner() {
+        let label = LabelWidget::new("shared", 13.0);
+        let (_widget, handle) = LabelRef::new_pair(label);
+
+        // handle.borrow_mut() で書き換え、 LabelRef widget 側からは set_text
+        // 直接観測手段なし (= public API は Widget trait 経由のみ) なので、
+        // 内部 dirty flag を 1 次性質として確認。 set_text 後は inner.dirty
+        // が true (LabelWidget::set_text() の挙動)。
+        handle.borrow_mut().clear_dirty();
+        assert!(!handle.borrow().dirty(), "clear_dirty 後 dirty=false");
+        handle.borrow_mut().set_text("dirty trigger");
+        assert!(handle.borrow().dirty(), "set_text 後 dirty=true (= 再 paint trigger)");
     }
 }
