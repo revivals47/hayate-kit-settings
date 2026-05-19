@@ -106,7 +106,7 @@ pub fn build(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widg
     let ratio = contrast_ratio(relative_luminance(r, g, b), relative_luminance(sr, sg, sb));
     let aa_pass = ratio >= 4.5;
     let wcag_note = format!(
-        "WCAG AA (>=4.5:1): {} vs surface = {} -- {} [reactive validation: wave 3b TextInput poll]",
+        "WCAG AA (>=4.5:1): {} vs surface = {} -- {} [reactive validation: dynamic re-calc 別 dispatch dep]",
         DEFAULT_ACCENT_HEX,
         format_ratio(ratio),
         if aa_pass {
