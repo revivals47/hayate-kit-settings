@@ -9,9 +9,11 @@
 //!   Phase 4 defer、 全 field ~50 件想定で linear で sufficient。
 //!
 //! ## wave 境界
-//! wave 2 = Search bar widget composition + filter callback signature 定義のみ。
-//! actual reactive bind (= TextInputWidget の text 変更 → `filter_sections`
-//! 呼出 → TreeView selection 更新) は wave 3 integration dep。
+//! wave 2 = Search bar widget composition + filter callback signature 定義。
+//! wave 3b = `TextInputWidget::on_change` push-style reactive bind で text 変更
+//! を [`AppStateHandles::search_query`] へ反映 ([`apply_search_query_change`])。
+//! TreeView selection 更新側 (= `filter_sections` 呼出 → `selected_section` set)
+//! は consumer 側 (main.rs / sidebar layout) の reactive observer dep。
 //!
 //! main.rs `build_sidebar` (= wave 2 で worker3 が更新) で `build(strings)` の
 //! return を VStack で TreeView の上に配置。
@@ -27,27 +29,38 @@ use crate::lang::{Lang, Strings};
 use crate::sections::SectionId;
 use crate::state::AppStateHandles;
 
-/// Search bar widget build (= Phase 2 wave 2 fill)。
+/// Search bar widget build (= Phase 2 wave 2 fill + wave 3b reactive wire)。
 ///
 /// `TextInputWidget` を placeholder = "Search settings..." + width 240px で
 /// 構成。 width は sidebar (= SplitView 30% 比率、 540 wide 既定で sidebar
-/// ~240px) に合わせ、 上限を控えめに設定。reactive bind (= text 変更 →
-/// `filter_sections` 呼出) は wave 3 integration dep、 本 wave 2 では UI
-/// composition のみ。
+/// ~240px) に合わせ、 上限を控えめに設定。
 ///
 /// HAYATE Original aesthetic は `active_theme()` 経由 default で reach 済
 /// (= GUI_kit R13 systemic fix land 後)、caller-side `.theme()` override 不要。
 ///
-/// ## wave 3a signature 拡張
-/// `_state: &AppStateHandles` を受け取るのは wave 3b で TextInput take_changed
-/// poll → state.search_query.set(text) → TreeView selection 更新 reactive bind
-/// を配線するため。 wave 3a 時点では未使用 (`_` prefix で warning suppress)。
-pub fn build(_strings: &'static Strings, _state: &AppStateHandles) -> Box<dyn Widget> {
+/// ## wave 3b on_change wire
+/// `.on_change(|t| apply_search_query_change(&state, t))` で push-style reactive
+/// bind。text 変更で [`AppStateHandles::search_query`] が即時更新され、
+/// consumer 側 (= main.rs / sidebar layout) が `search_query` を observe して
+/// [`filter_sections`] 呼出 → TreeView selection 更新を駆動する想定。
+/// search query は永続化対象外のため debouncer は触らない。
+pub fn build(_strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widget> {
     Box::new(
         TextInputWidget::new()
             .with_placeholder("Search settings...")
-            .with_width(240.0),
+            .with_width(240.0)
+            .on_change({
+                let state = state.clone();
+                move |text| apply_search_query_change(&state, text)
+            }),
     )
+}
+
+/// Search bar `on_change` の反映: 入力 text を [`AppStateHandles::search_query`]
+/// へ set。search_query は永続化対象外 (= UI live filter state) のため
+/// debouncer.request() は呼ばない。
+fn apply_search_query_change(state: &AppStateHandles, text: &str) {
+    state.search_query.set(text.to_owned());
 }
 
 /// Filter sections by query (= linear search over JA + EN strings)。
@@ -161,5 +174,17 @@ mod tests {
         let strings = Lang::En.strings();
         let r = filter_sections("zzzzzz_no_match", strings);
         assert!(r.is_empty());
+    }
+
+    // ── wave 3b on_change wire ─────────────────────────────────────────
+
+    #[test]
+    fn search_query_change_propagates_to_state() {
+        let state = crate::state::for_testing();
+        assert!(state.search_query.get().is_empty());
+        apply_search_query_change(&state, "appearance");
+        assert_eq!(*state.search_query.get(), "appearance");
+        // Search query は永続化対象外、 debouncer は触らないことを assert。
+        assert!(!state.debouncer.borrow().has_pending());
     }
 }

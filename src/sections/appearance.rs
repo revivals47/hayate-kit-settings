@@ -10,20 +10,22 @@
 //! 完全 WCAG 2.2 spec は scope outside。本 file では simple relative
 //! luminance ([`relative_luminance`]) + contrast ratio ([`contrast_ratio`]) の
 //! helper のみ、 default accent (`#5A8BA8` 風藍) vs default surface (`#FFFFFF`)
-//! の contrast を **静的に** 表示。 reactive update は accent_hex の poll wire
-//! が land した時点で dynamic 版に差替予定 (= 後述 wave 3b TextInput pending)。
+//! の contrast を **静的に** 表示。dynamic 再計算 (= 入力反映 → 表示更新) は
+//! reactive observer / shared widget handle 設計の別 dispatch dep、 本 wave で
+//! 永続化 wire を land、 表示側更新は後続で対応。
 //!
-//! ## wave 3b — persistence wire (partial)
-//! - Slider (`on_change`) と Color mode ComboBox (`on_select`) は本 wave で
+//! ## wave 3b — persistence wire (complete)
+//! - Slider (`on_change`) と Color mode ComboBox (`on_select`) は前置き commit で
 //!   `state.config` 更新 + debouncer 発火を配線済 ([`apply_font_scale_change`] /
 //!   [`apply_color_mode_selection`])。
-//! - **TextInput accent_hex は本 wave では poll 未配線**: `FormLayout` が
-//!   `Box<dyn Widget>` で widget を move-by-value し、 外部から `take_changed`
-//!   poll する path が無いため、 `Rc<RefCell<TextInputWidget>>` wrap widget
-//!   などの architectural change が必要。 PRESIDENT 上申中、 決定後の
-//!   wave 3b 後続 commit / wave 3c で land 予定。 本 wave では初期値を
-//!   `state.config.appearance.accent_hex` から `set_text` でロードする箇所
-//!   のみ land、 入力反映の poll は今は走らない。
+//! - TextInput accent_hex は本 commit で [`TextInputWidget::on_change`]
+//!   (GUI_kit PR #155 framework gap 解消で利用解禁) push-style reactive bind で
+//!   配線完了 ([`apply_accent_hex_change`])。`Rc<RefCell<TextInputWidget>>` wrap や
+//!   `take_changed` 外部 poll は不要、`Box<dyn Widget>` move-by-value のまま
+//!   builder chain 内で closure capture で state を共有する。初期値の
+//!   `set_text(&initial_accent)` 呼出は TextArea parity (PR #155) により
+//!   on_change を fire しないため、起動時の余計な debouncer.request() は
+//!   発生しない。
 
 use hayate_kit::widget::combo_box::ComboBoxWidget;
 use hayate_kit::widget::form_layout::FormLayout;
@@ -73,12 +75,19 @@ pub fn build(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widg
     });
 
     // ── Accent color hex ───────────────────────────────────────────────
-    // 初期値を state.config からロード、 入力反映の `take_changed` poll は
-    // 上記 module doc 記載の architectural 制約により本 wave 3b では未配線。
+    // 初期値を state.config からロード、入力反映は PR #155 framework gap fix で
+    // 利用可能になった TextInputWidget::on_change push-style reactive bind で
+    // 配線 (= apply_accent_hex_change → state.config.update + debouncer.request)。
+    // 初期 set_text は TextArea parity で on_change を fire しないため、
+    // 起動時に余計な save request が走らない。
     let initial_accent = state.config.get().appearance.accent_hex.clone();
     let mut accent_input = TextInputWidget::new()
         .with_placeholder(DEFAULT_ACCENT_HEX)
-        .with_width(160.0);
+        .with_width(160.0)
+        .on_change({
+            let state = state.clone();
+            move |text| apply_accent_hex_change(&state, text)
+        });
     if !initial_accent.is_empty() {
         accent_input.set_text(&initial_accent);
     }
@@ -90,7 +99,8 @@ pub fn build(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widg
 
     // WCAG simple contrast warning (= R11 mitigation 静的版)。
     // default accent 風藍 vs default surface 白 の contrast を計算して表示。
-    // accent_hex の poll wire 配線後 = dynamic 版に差替予定。
+    // accent_hex 永続化 wire は完了済、 表示の dynamic 更新は reactive observer /
+    // shared widget handle 設計の別 dispatch dep。
     let (r, g, b) = DEFAULT_ACCENT_RGB;
     let (sr, sg, sb) = DEFAULT_SURFACE_RGB;
     let ratio = contrast_ratio(relative_luminance(r, g, b), relative_luminance(sr, sg, sb));
@@ -144,6 +154,22 @@ fn apply_color_mode_selection(state: &AppStateHandles, selected: &str) {
         return;
     };
     state.config.update(|c| c.appearance.color_mode = value);
+    state.debouncer.borrow().request();
+}
+
+/// Accent color hex TextInput の `on_change` を反映 + debouncer 発火。
+///
+/// 文字 1 字編集ごとに発火する想定 (= IME commit / key event Changed / Cut
+/// 各経路で fire)。 RequestPaste と set_text は fire しない契約 (PR #155
+/// codex 査読確定) のため、起動時の初期 set_text + Ctrl+V 要求では本 helper は
+/// 呼ばれない。disk thrash 回避は `debouncer.request()` の 500ms quiet-period に
+/// 委ねる。modals.rs `apply_accent_hex_change` と論理同一だが、各 file 内
+/// private helper duplicate pattern (= 既存 WCAG helper duplicate と同形)
+/// を維持。
+fn apply_accent_hex_change(state: &AppStateHandles, text: &str) {
+    state
+        .config
+        .update(|c| c.appearance.accent_hex = text.to_owned());
     state.debouncer.borrow().request();
 }
 
@@ -268,5 +294,13 @@ mod tests {
         assert_eq!(parse_color_mode(COLOR_MODE_DARK), Some(ColorMode::Dark));
         assert_eq!(parse_color_mode(COLOR_MODE_SYSTEM), Some(ColorMode::System));
         assert_eq!(parse_color_mode("Sepia"), None);
+    }
+
+    #[test]
+    fn accent_hex_change_propagates_and_requests_save() {
+        let state = crate::state::for_testing();
+        apply_accent_hex_change(&state, "#3D6884");
+        assert_eq!(state.config.get().appearance.accent_hex, "#3D6884");
+        assert!(state.debouncer.borrow().has_pending());
     }
 }
