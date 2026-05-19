@@ -14,7 +14,9 @@
 //! (GUI_kit repo 内、Phase 0 spec)
 
 mod lang;
+mod modals;
 mod persistence;
+mod search;
 mod sections;
 
 // 規範整合性: `use hayate_kit::...` のみ、`use hayate_platform::...` 禁止
