@@ -815,6 +815,7 @@ dependencies = [
  "hayate-kit",
  "serde",
  "serde_json",
+ "xkbcommon",
 ]
 
 [[package]]

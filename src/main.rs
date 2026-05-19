@@ -27,12 +27,17 @@ use hayate_kit::style::widget_theme_presets::app::app_theme_hayate_original;
 use hayate_kit::style::widget_theme_presets::titlebar::titlebar_theme_hayate_original;
 use hayate_kit::widget::default_chrome::build_systemlike;
 use hayate_kit::widget::layout::VStack;
+use hayate_kit::widget::overlay::OverlayPosition;
 use hayate_kit::widget::split_view::{SplitOrientation, SplitViewWidget};
 use hayate_kit::widget::tree_view::{TreeNode, TreeViewWidget};
 use hayate_kit::{App, Decorations, ReactiveRuntime, Widget, WindowPolicy, HAYATE_ORIGINAL};
 
 use crate::detail_container::DetailContainerWidget;
 use crate::lang::{Lang, Strings};
+use crate::modals::{
+    apply_accent_picker, apply_reset_confirm, build_accent_picker, build_reset_confirm,
+    ReactiveOverlayContainer,
+};
 use crate::sections::SectionId;
 use crate::state::AppStateHandles;
 
@@ -213,14 +218,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Detail pane は DetailContainerWidget で wrap、 state.selected_section の
     // 変化を polling 検出して section 用 widget tree を rebuild
     // (= wave 3b worker3 dispatch、 design doc Pattern A = dynamic rebuild)。
+    // SplitView 全体は track2 land の ReactiveOverlayContainer の base として渡す
+    // ことで 2 worker (= track2 modal lifecycle / track3 reactive detail pane)
+    // の root structure を直交 nest で統合 (= step 4 reconciliation)。
     let sidebar = build_sidebar(strings, &app_state);
     let detail: Box<dyn Widget> = Box::new(DetailContainerWidget::new(
         app_state.clone(),
         move |sid, s| build_detail(strings, sid, s),
     ));
-    let root = SplitViewWidget::new(sidebar, detail, SplitOrientation::Horizontal)
+    let split = SplitViewWidget::new(sidebar, detail, SplitOrientation::Horizontal)
         .with_ratio(0.3) // sidebar = 30%、 detail = 70%
         .with_min_sizes(180.0, 400.0); // sidebar 最低 180px、 detail 最低 400px
+
+    // Phase 2 wave 3b track2: ReactiveOverlayContainer { OverlayContainer {
+    // base: SplitView, overlays: [accent, reset] } } で root を組み立て、
+    // State<bool> 駆動 visibility + Escape/Enter pre-intercept + dimming を
+    // framework 側 (= hayate_kit::widget::overlay::OverlayContainer) に委譲。
+    //
+    // PRESIDENT Option β 採択 (= AlertDialog 不使用、 2 modal を VStack 統一)。
+    // double-dimming 解消 + visibility coordination 単一 source (= State<bool>) で
+    // 一貫性確保 (= [[feedback_platform_principle]] 整合)。
+    //
+    // overlay 登録順 = bindings 末尾優先で accept/dismiss 走査するため、 末尾に
+    // 入れた reset_confirm が Escape/Enter 競合時の優先 dismiss/accept 対象。
+    // 通常 UX 上 2 modal 同時 visible にはならない設計だが、 安全側 fallback。
+    let accent_overlay = build_accent_picker(strings, &app_state);
+    let reset_overlay = build_reset_confirm(strings, &app_state);
+
+    let mut root = ReactiveOverlayContainer::new(Box::new(split));
+
+    // accent picker on_enter = Apply 押下と同等 (= draft_accent_hex 経由 commit)。
+    // apply_accent_picker は内部で state.accent_picker_visible.set(false) を呼ぶ
+    // ため、 closure が dismiss + action 両 result を提供する。
+    let accent_enter_state = app_state.clone();
+    root.add_overlay_with_state_and_enter(
+        "accent",
+        accent_overlay,
+        OverlayPosition::Center,
+        app_state.accent_picker_visible.clone(),
+        move || {
+            let draft = accent_enter_state.draft_accent_hex.get().clone();
+            apply_accent_picker(&accent_enter_state, &draft);
+        },
+    );
+
+    // reset confirm on_enter = Reset 押下と同等 (= persistence::reset + default
+    // 復元)。 disk 失敗時は WARN + visible flag clear (= build_reset_confirm 内
+    // Reset button on_click と同 fallback)。
+    let reset_enter_state = app_state.clone();
+    root.add_overlay_with_state_and_enter(
+        "reset",
+        reset_overlay,
+        OverlayPosition::Center,
+        app_state.reset_confirm_visible.clone(),
+        move || {
+            if let Err(e) = apply_reset_confirm(&reset_enter_state) {
+                eprintln!("WARN: hayate-kit-settings: reset failed: {e}");
+                reset_enter_state.reset_confirm_visible.set(false);
+            }
+        },
+    );
 
     app.run(Box::new(root))
 }

@@ -23,3 +23,10 @@ serde_json = "1"
 # CLI argument parsing (= safe boot mode --reset-config flag、RFC v0.2 §5.1
 # deliverable 7、R12 mandatory = bricked state recovery path 確保)
 clap = { version = "4", features = ["derive"] }
+
+# xkbcommon Keysym constants (= modal Escape pre-intercept で `Keysym::Escape`
+# 比較に使用、 wave 3b track2 ReactiveOverlayContainer.event() 配線)。 hayate-kit
+# が transitive で同 crate を使用 (= GUI_kit workspace pin = "0.8" + wayland feat)、
+# 本 dep は third-party crate であり framework = hayate-platform 直 dep ではない
+# ため `feedback_new_apps_depend_on_gui_kit_only` 規範違反に該当しない。
+xkbcommon = { version = "0.8", features = ["wayland"] }
