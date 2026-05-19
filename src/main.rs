@@ -13,6 +13,7 @@
 //! `workspace/president-notes/hayate-kit-settings-rfc-v0.1.md` v0.3
 //! (GUI_kit repo 内、Phase 0 spec)
 
+mod detail_container;
 mod lang;
 mod modals;
 mod persistence;
@@ -31,11 +32,13 @@ use hayate_kit::widget::split_view::{SplitOrientation, SplitViewWidget};
 use hayate_kit::widget::tree_view::{TreeNode, TreeViewWidget};
 use hayate_kit::{App, Decorations, ReactiveRuntime, Widget, WindowPolicy, HAYATE_ORIGINAL};
 
+use crate::detail_container::DetailContainerWidget;
 use crate::lang::{Lang, Strings};
 use crate::modals::{
     apply_accent_picker, apply_reset_confirm, build_accent_picker, build_reset_confirm,
     ReactiveOverlayContainer,
 };
+use crate::sections::SectionId;
 use crate::state::AppStateHandles;
 
 /// Settings panel for hayate-kit, an embedded GUI framework.
@@ -99,7 +102,19 @@ fn build_sidebar(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn 
         TreeNode::new(strings.section_ime),
         TreeNode::new(strings.section_advanced),
     ];
-    let tree = TreeViewWidget::new(nodes);
+
+    // TreeView nav 選択 → state.selected_section.set で reactive 配線
+    // (= wave 3b worker3 dispatch、 DetailContainerWidget が version polling で
+    // 検出 → 該当 section の widget tree に rebuild)。
+    // 空 path / 範囲外 path は **現在の selection を維持** (= panic 回避 + UX:
+    // 異常 path 押下で detail pane が default = General に強制リセットされる
+    // 不自然さを排除、 codex PR #9 finding 3 反映)。
+    let nav_state = state.clone();
+    let tree = TreeViewWidget::new(nodes).on_select(move |path| {
+        let current = *nav_state.selected_section.get();
+        let sid = SectionId::from_tree_path(&path).unwrap_or(current);
+        nav_state.selected_section.set(sid);
+    });
 
     let mut stack = VStack::new(8.0);
     stack = stack.add(search::build(strings, state));
@@ -199,8 +214,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // HStack::add(child=flex 0) は unbounded constraint を渡すため TreeView が
     // infinity 占有 → detail pane 0px。 SplitView は ratio + min_sizes 経路で
     // proportional split を保証、 sidebar と detail 両方 visible に。
+    //
+    // Detail pane は DetailContainerWidget で wrap、 state.selected_section の
+    // 変化を polling 検出して section 用 widget tree を rebuild
+    // (= wave 3b worker3 dispatch、 design doc Pattern A = dynamic rebuild)。
+    // SplitView 全体は track2 land の ReactiveOverlayContainer の base として渡す
+    // ことで 2 worker (= track2 modal lifecycle / track3 reactive detail pane)
+    // の root structure を直交 nest で統合 (= step 4 reconciliation)。
     let sidebar = build_sidebar(strings, &app_state);
-    let detail = build_detail(strings, sections::SectionId::default(), &app_state);
+    let detail: Box<dyn Widget> = Box::new(DetailContainerWidget::new(
+        app_state.clone(),
+        move |sid, s| build_detail(strings, sid, s),
+    ));
     let split = SplitViewWidget::new(sidebar, detail, SplitOrientation::Horizontal)
         .with_ratio(0.3) // sidebar = 30%、 detail = 70%
         .with_min_sizes(180.0, 400.0); // sidebar 最低 180px、 detail 最低 400px
