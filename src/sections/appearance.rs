@@ -163,9 +163,10 @@ fn apply_color_mode_selection(state: &AppStateHandles, selected: &str) {
 /// 各経路で fire)。 RequestPaste と set_text は fire しない契約 (PR #155
 /// codex 査読確定) のため、起動時の初期 set_text + Ctrl+V 要求では本 helper は
 /// 呼ばれない。disk thrash 回避は `debouncer.request()` の 500ms quiet-period に
-/// 委ねる。modals.rs `apply_accent_hex_change` と論理同一だが、各 file 内
-/// private helper duplicate pattern (= 既存 WCAG helper duplicate と同形)
-/// を維持。
+/// 委ねる。modal 経由の hex 反映 path (= `modals::apply_accent_picker`) は
+/// 同等の config commit + debouncer 起動 + draft re-seed 統合を提供する。 本
+/// helper は inline TextInput 用 (= modal scope 外) で sections 内 private
+/// duplicate として維持 (= 既存 WCAG helper duplicate と同形 pattern)。
 fn apply_accent_hex_change(state: &AppStateHandles, text: &str) {
     state
         .config
