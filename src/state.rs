@@ -53,6 +53,12 @@ pub struct AppStateHandles {
     pub accent_picker_visible: State<bool>,
     /// Reset confirm modal の show/hide flag (= destructive action gate)。
     pub reset_confirm_visible: State<bool>,
+    /// Accent picker TextInput の draft 値 (= Apply 押下までは config 不反映)。
+    /// `TextInput::on_change` callback で都度更新、 Apply button on_click closure が
+    /// 本値を読み出して `apply_accent_picker(state, &draft)` を呼ぶ経路。 wave 3b
+    /// で `Config::default().appearance.accent_hex` 由来の initial value を入れ、
+    /// persistence load 直後は config の現値 (= 既存ユーザー設定 or default) と一致。
+    pub draft_accent_hex: State<String>,
     /// 500ms quiet-period 共有 debouncer。 borrow_mut した上で request() を呼ぶ
     /// (= 連続 toggle で disk thrash を防ぐ)。
     pub debouncer: Rc<RefCell<DebouncedSaver>>,
@@ -68,12 +74,14 @@ impl AppStateHandles {
     /// dirty flag を State 群が共有するための source。 各 State は
     /// `runtime.create_state(...)` 経由で作られ、 値変更で自動 repaint trigger。
     pub fn new(runtime: &ReactiveRuntime, initial_config: Config, config_path: PathBuf) -> Self {
+        let initial_accent = initial_config.appearance.accent_hex.clone();
         Self {
             config: runtime.create_state(initial_config),
             selected_section: runtime.create_state(SectionId::default()),
             search_query: runtime.create_state(String::new()),
             accent_picker_visible: runtime.create_state(false),
             reset_confirm_visible: runtime.create_state(false),
+            draft_accent_hex: runtime.create_state(initial_accent),
             debouncer: Rc::new(RefCell::new(DebouncedSaver::new())),
             config_path,
         }
@@ -110,6 +118,50 @@ mod tests {
         assert!(!*h.reset_confirm_visible.get());
         assert!(!h.debouncer.borrow().has_pending());
         assert_eq!(h.config_path, path);
+    }
+
+    #[test]
+    fn draft_accent_hex_initial_matches_config_accent() {
+        // 起動時 persistence load 由来の Config を State 化すると、 draft_accent_hex
+        // initial は config の現値 (= default or persisted user value) と一致する。
+        let runtime = ReactiveRuntime::new();
+        let config = Config::default();
+        let expected = config.appearance.accent_hex.clone();
+        let h = AppStateHandles::new(
+            &runtime,
+            config,
+            PathBuf::from("/tmp/hayate-kit-settings-test/draft.json"),
+        );
+        assert_eq!(*h.draft_accent_hex.get(), expected);
+    }
+
+    #[test]
+    fn draft_accent_hex_initial_reflects_persisted_value() {
+        // persistence load 結果が non-default の場合、 draft はその値で start。
+        let runtime = ReactiveRuntime::new();
+        let mut config = Config::default();
+        config.appearance.accent_hex = String::from("#ABCDEF");
+        let h = AppStateHandles::new(
+            &runtime,
+            config,
+            PathBuf::from("/tmp/hayate-kit-settings-test/persisted.json"),
+        );
+        assert_eq!(*h.draft_accent_hex.get(), "#ABCDEF");
+    }
+
+    #[test]
+    fn draft_accent_hex_shared_across_clones() {
+        // TextInput::on_change closure が clone を capture して set すると、
+        // Apply button on_click closure 側 clone でも観測可 (= 同 Rc 内部値)。
+        let runtime = ReactiveRuntime::new();
+        let h1 = AppStateHandles::new(
+            &runtime,
+            Config::default(),
+            PathBuf::from("/tmp/hayate-kit-settings-test/shared.json"),
+        );
+        let h2 = h1.clone();
+        h2.draft_accent_hex.set(String::from("#FF0000"));
+        assert_eq!(*h1.draft_accent_hex.get(), "#FF0000");
     }
 
     #[test]
