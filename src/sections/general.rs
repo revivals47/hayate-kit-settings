@@ -22,13 +22,19 @@ use hayate_kit::widget::switch::SwitchWidget;
 use hayate_kit::Widget;
 
 use crate::lang::Strings;
+use crate::state::AppStateHandles;
 
 /// Build General section widget tree。
 ///
 /// wave 1 構造 = `VStack { heading + FormLayout { 3 rows } }`。
 /// HAYATE Original aesthetic は `active_theme()` default 経由で自動適用
 /// (= R13 systemic fix 済、caller `.with_color(...)` override 不要)。
-pub fn build(strings: &'static Strings) -> Box<dyn Widget> {
+///
+/// ## wave 3a signature 拡張
+/// `_state: &AppStateHandles` を受け取るのは wave 3b で callback wire (= ComboBox
+/// on_select / Switch on_toggle → state.config.update → debouncer.request) を
+/// 配線するため。 wave 3a 時点では未使用 (`_` prefix で warning suppress)。
+pub fn build(strings: &'static Strings, _state: &AppStateHandles) -> Box<dyn Widget> {
     let heading = LabelWidget::new(strings.section_general, 18.0);
 
     // Language picker — 日本語 / English の 2 択。actual `Lang` enum 連動 は
@@ -67,7 +73,8 @@ mod tests {
         // smoke: ja / en 両方で widget tree が組まれることを確認。
         // Box<dyn Widget> の inner structure は型 system が保証するため
         // depth / row count 直接 assertion は省略 (= Box invariant 経由)。
-        let _ja = build(Lang::Ja.strings());
-        let _en = build(Lang::En.strings());
+        let state = crate::state::for_testing();
+        let _ja = build(Lang::Ja.strings(), &state);
+        let _en = build(Lang::En.strings(), &state);
     }
 }

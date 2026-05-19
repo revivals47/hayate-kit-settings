@@ -31,6 +31,7 @@ use hayate_kit::widget::text_input_widget::TextInputWidget;
 use hayate_kit::Widget;
 
 use crate::lang::Strings;
+use crate::state::AppStateHandles;
 
 /// HAYATE Original default accent (= `#5A8BA8` 風藍、 RFC v0.2 §3 design language)。
 const DEFAULT_ACCENT_HEX: &str = "#5A8BA8";
@@ -45,7 +46,12 @@ const DEFAULT_ACCENT_RGB: (u8, u8, u8) = (90, 139, 168);
 /// Theme subheading + Theme defer note }`。 Theme サブセクションは Phase 3
 /// hero feature defer のため標準 LabelWidget で hardcoded note のみ表示
 /// (= 実 theme switcher widget は Phase 3 land)。
-pub fn build(strings: &'static Strings) -> Box<dyn Widget> {
+/// ## wave 3a signature 拡張
+/// `_state: &AppStateHandles` を受け取るのは wave 3b で Slider on_change /
+/// ComboBox on_select / TextInput take_changed poll → state.config.update →
+/// debouncer.request、 さらに hex 入力 → WCAG ratio dynamic 更新を配線するため。
+/// wave 3a 時点では未使用 (`_` prefix で warning suppress)。
+pub fn build(strings: &'static Strings, _state: &AppStateHandles) -> Box<dyn Widget> {
     let heading = LabelWidget::new(strings.section_appearance, 18.0);
 
     // Font size scale — 10.0 から 20.0、 default 14.0 (= HAYATE Original baseline)。
@@ -145,8 +151,9 @@ mod tests {
 
     #[test]
     fn build_returns_non_panicking_tree_for_both_languages() {
-        let _ja = build(Lang::Ja.strings());
-        let _en = build(Lang::En.strings());
+        let state = crate::state::for_testing();
+        let _ja = build(Lang::Ja.strings(), &state);
+        let _en = build(Lang::En.strings(), &state);
     }
 
     #[test]

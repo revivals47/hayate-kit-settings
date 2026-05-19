@@ -28,9 +28,16 @@ use hayate_kit::widget::switch::SwitchWidget;
 use hayate_kit::Widget;
 
 use crate::lang::Strings;
+use crate::state::AppStateHandles;
 
 /// Build Advanced section widget tree (= wave 1 fill)。
-pub fn build(strings: &'static Strings) -> Box<dyn Widget> {
+///
+/// ## wave 3a signature 拡張
+/// `_state: &AppStateHandles` を受け取るのは wave 3b で debug_overlay on_toggle /
+/// log_level on_select → state.config.update、 cache_clear / reset_* on_click →
+/// state.reset_confirm_visible.set(true) を配線するため。 wave 3a 時点では
+/// 未使用 (`_` prefix で warning suppress)。
+pub fn build(strings: &'static Strings, _state: &AppStateHandles) -> Box<dyn Widget> {
     let heading = LabelWidget::new(strings.section_advanced, 18.0);
 
     // Field 1: Debug overlay toggle (= FPS / hit-test rect / widget tree)
@@ -107,6 +114,7 @@ mod tests {
         // structural integrity check (= wave 1 placement のみ、event/paint は
         // wave 2/3 reactive bind 後の visual smoke で verify)。
         let strings = Lang::En.strings();
-        let _w = build(strings);
+        let state = crate::state::for_testing();
+        let _w = build(strings, &state);
     }
 }

@@ -26,8 +26,13 @@ use hayate_kit::widget::switch::SwitchWidget;
 use hayate_kit::Widget;
 
 use crate::lang::Strings;
+use crate::state::AppStateHandles;
 
-pub fn build(strings: &'static Strings) -> Box<dyn Widget> {
+/// ## wave 3a signature 拡張
+/// `_state: &AppStateHandles` を受け取るのは wave 3b で各 Switch on_toggle →
+/// state.config.update → debouncer.request を配線するため。 wave 3a 時点では
+/// 未使用 (`_` prefix で warning suppress)。
+pub fn build(strings: &'static Strings, _state: &AppStateHandles) -> Box<dyn Widget> {
     let heading = LabelWidget::new(strings.section_accessibility, 18.0);
 
     let screen_reader = SwitchWidget::new(false);
@@ -62,7 +67,8 @@ mod tests {
     #[test]
     fn build_returns_non_empty_widget_tree() {
         let strings = Lang::En.strings();
-        let _root = build(strings);
+        let state = crate::state::for_testing();
+        let _root = build(strings, &state);
         // smoke: build() returns Box<dyn Widget> without panic。
         // 内部構造は VStack { heading + FormLayout (4 Switch) + defer note Label }。
     }

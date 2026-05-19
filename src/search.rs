@@ -25,6 +25,7 @@ use hayate_kit::Widget;
 
 use crate::lang::{Lang, Strings};
 use crate::sections::SectionId;
+use crate::state::AppStateHandles;
 
 /// Search bar widget build (= Phase 2 wave 2 fill)。
 ///
@@ -36,7 +37,12 @@ use crate::sections::SectionId;
 ///
 /// HAYATE Original aesthetic は `active_theme()` 経由 default で reach 済
 /// (= GUI_kit R13 systemic fix land 後)、caller-side `.theme()` override 不要。
-pub fn build(_strings: &'static Strings) -> Box<dyn Widget> {
+///
+/// ## wave 3a signature 拡張
+/// `_state: &AppStateHandles` を受け取るのは wave 3b で TextInput take_changed
+/// poll → state.search_query.set(text) → TreeView selection 更新 reactive bind
+/// を配線するため。 wave 3a 時点では未使用 (`_` prefix で warning suppress)。
+pub fn build(_strings: &'static Strings, _state: &AppStateHandles) -> Box<dyn Widget> {
     Box::new(
         TextInputWidget::new()
             .with_placeholder("Search settings...")
@@ -110,7 +116,8 @@ mod tests {
     fn build_smoke_does_not_panic() {
         // smoke: build(strings) が panic せず Box<dyn Widget> を返却。
         let strings = Lang::En.strings();
-        let _w = build(strings);
+        let state = crate::state::for_testing();
+        let _w = build(strings, &state);
     }
 
     #[test]

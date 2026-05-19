@@ -38,6 +38,7 @@ use hayate_kit::Widget;
 
 #[allow(unused_imports)] // wave 3 で `Strings` field を本格使用予定
 use crate::lang::Strings;
+use crate::state::AppStateHandles;
 
 /// HAYATE Original default accent (= `#5A8BA8` 風藍、 RFC v0.2 §3 design language)。
 const DEFAULT_ACCENT_HEX: &str = "#5A8BA8";
@@ -51,8 +52,12 @@ const DEFAULT_SURFACE_RGB: (u8, u8, u8) = (255, 255, 255);
 /// 構造: `VStack { hex TextInput + preview swatch Label + WCAG ratio Label }`。
 /// wave 3 で hex 入力 → reactive bind → preview swatch / WCAG ratio dynamic 更新を
 /// 配線予定 (= 現状は default `#5A8BA8` 風藍 vs `#FFFFFF` surface で静的計算)。
+/// ## wave 3a signature 拡張
+/// `_state: &AppStateHandles` を受け取るのは wave 3b で hex TextInput take_changed
+/// poll → state.config.update + WCAG ratio dynamic 再計算、 Apply ボタン on_click →
+/// state.accent_picker_visible.set(false) を配線するため。
 #[allow(dead_code)] // wave 3 で main.rs / appearance.rs から呼ばれる
-pub fn build_accent_picker(_strings: &'static Strings) -> Box<dyn Widget> {
+pub fn build_accent_picker(_strings: &'static Strings, _state: &AppStateHandles) -> Box<dyn Widget> {
     // hex 入力 (= default 風藍を placeholder 提示)。 wave 3 で on_change wire。
     let hex_input = TextInputWidget::new()
         .with_placeholder(DEFAULT_ACCENT_HEX)
@@ -97,8 +102,13 @@ pub fn build_accent_picker(_strings: &'static Strings) -> Box<dyn Widget> {
 /// 構造: `VStack { confirm message Label + HStack { Cancel ButtonWidget + Reset
 /// ButtonWidget } }`。 click callback は wave 3 dep で placeholder closure
 /// (= `|| {}`)。 wave 3 で persistence reset + modal dismiss を配線予定。
+/// ## wave 3a signature 拡張
+/// `_state: &AppStateHandles` を受け取るのは wave 3b で Cancel on_click →
+/// state.reset_confirm_visible.set(false)、 Reset on_click →
+/// persistence::reset(&state.config_path) + state.config.set(Config::default()) +
+/// dismiss を配線するため。
 #[allow(dead_code)] // wave 3 で main.rs / advanced.rs から呼ばれる
-pub fn build_reset_confirm(_strings: &'static Strings) -> Box<dyn Widget> {
+pub fn build_reset_confirm(_strings: &'static Strings, _state: &AppStateHandles) -> Box<dyn Widget> {
     let message = LabelWidget::new(
         "全 settings を default に reset しますか? (この操作は取消不可)",
         14.0,
@@ -151,7 +161,8 @@ mod tests {
     #[test]
     fn build_accent_picker_smoke() {
         let strings = Lang::En.strings();
-        let _root = build_accent_picker(strings);
+        let state = crate::state::for_testing();
+        let _root = build_accent_picker(strings, &state);
         // 構造: VStack { TextInput + preview Label + WCAG ratio Label }。
         // smoke: panic なく Box<dyn Widget> 返却。
     }
@@ -159,7 +170,8 @@ mod tests {
     #[test]
     fn build_reset_confirm_smoke() {
         let strings = Lang::En.strings();
-        let _root = build_reset_confirm(strings);
+        let state = crate::state::for_testing();
+        let _root = build_reset_confirm(strings, &state);
         // 構造: VStack { message Label + HStack { Cancel Button + Reset Button } }。
         // smoke: panic なく Box<dyn Widget> 返却、placeholder closure capture OK。
     }
