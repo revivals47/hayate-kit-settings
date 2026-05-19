@@ -14,16 +14,17 @@
 //! (GUI_kit repo 内、Phase 0 spec)
 
 mod lang;
+mod persistence;
+mod sections;
 
 // 規範整合性: `use hayate_kit::...` のみ、`use hayate_platform::...` 禁止
 use clap::Parser;
 use hayate_kit::style::widget_theme_presets::app::app_theme_hayate_original;
 use hayate_kit::style::widget_theme_presets::titlebar::titlebar_theme_hayate_original;
-use hayate_kit::widget::form_layout::FormLayout;
-use hayate_kit::widget::label::LabelWidget;
+use hayate_kit::widget::default_chrome::build_systemlike;
 use hayate_kit::widget::split_view::{SplitOrientation, SplitViewWidget};
 use hayate_kit::widget::tree_view::{TreeNode, TreeViewWidget};
-use hayate_kit::{App, Widget, HAYATE_ORIGINAL};
+use hayate_kit::{App, Decorations, Widget, WindowPolicy, HAYATE_ORIGINAL};
 
 use crate::lang::{Lang, Strings};
 
@@ -88,23 +89,24 @@ fn build_sidebar(strings: &'static Strings) -> TreeViewWidget {
     TreeViewWidget::new(nodes)
 }
 
-/// Detail pane = "General" section の placeholder FormLayout (= Phase 1 stub)。
-/// Phase 2 で section selected の reactive bind + 各 section の form 内容を
-/// 順次 implementation。
-fn build_detail(strings: &'static Strings) -> Box<dyn Widget> {
-    // FormLayout に "Coming soon" placeholder field を 1 row。
-    // label widget は HAYATE_DARK fg hardcoded 既知 limitation ([[R13]])、
-    // explicit .with_color() で text-primary override (= 風韻 warm dark)
-    let coming_soon = LabelWidget::new(strings.coming_soon, 14.0).with_color(42, 41, 37);
-    let heading = LabelWidget::new(strings.section_general, 18.0).with_color(42, 41, 37);
-    let form = FormLayout::new().row(strings.section_general, coming_soon);
-
-    // VStack { heading + form } で section heading の上に form
-    use hayate_kit::widget::layout::VStack;
-    let mut stack = VStack::new(16.0); // space-md per RFC §3.4
-    stack = stack.add(Box::new(heading));
-    stack = stack.add(Box::new(form));
-    Box::new(stack)
+/// Detail pane = selected section の widget tree (= Phase 2 wave 0 scaffolding)。
+///
+/// wave 0 = 各 section module から `build(strings)` 経由で widget tree を返す、
+/// 現状 default = SectionId::General。 wave 2/3 で TreeView selection state と
+/// reactive bind で dynamic section switching 実装。
+///
+/// 各 section impl は src/sections/{general,appearance,accessibility,ime,
+/// advanced}.rs に分離、 wave 1 worker dispatch で fill。 R13 systemic fix
+/// 完遂後は LabelWidget 内 hardcoded HAYATE_DARK 問題解消、 caller .with_color()
+/// override は不要 (= 各 section module で active_theme() 経由)。
+fn build_detail(strings: &'static Strings, section: sections::SectionId) -> Box<dyn Widget> {
+    match section {
+        sections::SectionId::General => sections::general::build(strings),
+        sections::SectionId::Appearance => sections::appearance::build(strings),
+        sections::SectionId::Accessibility => sections::accessibility::build(strings),
+        sections::SectionId::Ime => sections::ime::build(strings),
+        sections::SectionId::Advanced => sections::advanced::build(strings),
+    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -119,12 +121,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return reset_config(lang);
     }
 
-    // Normal launch: App builder chain = HAYATE Original 3-builder
+    // Normal launch: App builder chain = HAYATE Original 全 opt-in hard-baked
+    // (= RFC v0.2 §1.3 「全 opt-in pattern hard-baked」規範整合)
+    // Decorations::SystemLike + build_systemlike で close/min/max button 標準装備
+    let titlebar = titlebar_theme_hayate_original();
+    let policy = WindowPolicy::default();
     let app = App::new(strings.app_title, 800, 540)
         .with_theme(&HAYATE_ORIGINAL)
-        .with_titlebar_theme(titlebar_theme_hayate_original())
+        .with_titlebar_theme(titlebar.clone())
         .with_app_theme(app_theme_hayate_original())
+        .with_window_policy(policy.clone())
         .with_min_size(560, 400);
+
+    // Decorations::SystemLike opt-in (= R12 + RFC v0.2 §1.3 hard-baked、
+    // close/min/max button 標準装備、 default = Decorations::Borderless から
+    // 明示 opt-in する規範)
+    let window_action = app.window_action();
+    let current_title = app.current_title();
+    let chrome = build_systemlike(
+        strings.app_title,
+        &window_action,
+        &policy,
+        Some(&titlebar),
+        &current_title,
+    );
+    let app = app.with_decorations(Decorations::SystemLike(chrome));
 
     // Phase 1 step 6 skeleton: SplitView { Sidebar (TreeView nav) + Detail pane }
     // HStack ではなく SplitView を使用する理由 (= R13 fix 後 visual re-verify で発覚):
@@ -133,7 +154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // infinity 占有 → detail pane 0px。 SplitView は ratio + min_sizes 経路で
     // proportional split を保証、 sidebar と detail 両方 visible に。
     let sidebar = build_sidebar(strings);
-    let detail = build_detail(strings);
+    let detail = build_detail(strings, sections::SectionId::default());
     let root = SplitViewWidget::new(Box::new(sidebar), detail, SplitOrientation::Horizontal)
         .with_ratio(0.3) // sidebar = 30%、 detail = 70%
         .with_min_sizes(180.0, 400.0); // sidebar 最低 180px、 detail 最低 400px
