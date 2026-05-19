@@ -1,0 +1,21 @@
+[package]
+name = "hayate-kit-settings"
+version = "0.1.0"
+edition = "2021"
+description = "GUI_kit framework-native settings panel app (新世代 app 第 1 号、HAYATE original aesthetic + theme switcher)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/revivals47/hayate-kit-settings"
+readme = "README.md"
+
+# 規範: feedback_new_apps_depend_on_gui_kit_only (= 新世代 app は GUI_kit のみ
+# 依存、framework = hayate-platform 直接依存禁止)。必要な framework API は
+# hayate-kit 経由 re-export で reach、不足あれば hayate-kit を extend
+# (= GUI_kit/crates/hayate-kit/src/lib.rs に pub use 追加 PR)。
+[dependencies]
+hayate-kit = { path = "../GUI_kit/crates/hayate-kit" }
+# hayate-platform 直 dep 禁止 (= 上記規範)
+# hayate-ui shim 不使用 (= legacy dogfood 専用)
+
+# Persistence + i18n minimal
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
