@@ -1,11 +1,20 @@
 # wave 3b modal visual wire — design draft
 
-**Status**: design-frozen、 framework PR land 後即着手予定。
-**Branch**: track2/phase2-wave3-modal-lifecycle (= 本 doc 作成済 worktree)
+**Status (v0.2)**: implementation revision applied — see §10 for change log v0.1 → v0.2。
+**Branch**: track2/phase2-wave3-modal-lifecycle
 **Prerequisites**: GUI_kit-track-framework-extend land (= `TextInput::on_change`
 callback method 追加 + hayate-kit から `Renderer` / `ItemRect` / `TextEngine` /
-`alloc_widget_id` / `PopupId` re-export 追加)
+`alloc_widget_id` / `PopupId` re-export 追加) ← v0.1 表現、 v0.2 で
+**PR #155 として land 完了** + 副次 finding により `alloc_widget_id` / `PopupId`
+は worker2 case 不要に確定 (= §10 詳細)
 **Author**: worker2 (= 並走 design draft、 boss1 推奨 iii)
+
+> ⚠️ **READ FIRST**: §2 / §3 / §5 の `AlertDialogContainer` 名 + AlertDialog
+> 採用設計 + `hayate_kit::Key::Escape` 参照は v0.1 時点の draft。 v0.2 実装で
+> 採用された design は §10 revision history を参照 (= `ReactiveOverlayContainer`
+> + OverlayContainer 利用 + 混在 → VStack 統一 + `xkbcommon::xkb::Keysym::Escape`)。
+> 本 body §2-§9 は v0.1 として保存、 後世の re-discover 用に維持 (= workflow
+> pattern 4 適用)。
 
 ## 1. 背景と目的
 
@@ -384,6 +393,8 @@ branch (track2/phase2-wave3-modal-lifecycle) 上で以下順次 commit:
 
 ## 9. 完了基準 (= 最終 PR raise 時)
 
+> v0.1 元基準。 v0.2 で実装 path が確定した完了基準は §10.4 を参照。
+
 - [ ] commit `baca8fc` (= 本 logic-only subset) preserved
 - [ ] framework PR land + Cargo.toml bump
 - [ ] state.rs: draft_accent_hex 追加 + tests
@@ -393,3 +404,132 @@ branch (track2/phase2-wave3-modal-lifecycle) 上で以下順次 commit:
 - [ ] cargo check -j1 / cargo test --bins -j1 (= 61-64 passed 想定) /
       cargo clippy --all-targets -j1 全 green
 - [ ] PR raise + boss1 ack
+
+## 10. Revision history (v0.1 → v0.2) — implementation 着手で確定した補正
+
+本章は v0.1 doc の主要 design 判断点で、 worker2 実装着手前後の grep + framework
+PR #155 land + PRESIDENT 即決 trigger 経由で revise された点を網羅。 後世が
+「なぜ v0.1 通りに実装されなかったか」を re-discover 可能化する責務 (=
+workflow pattern 4 適用、 [[feedback_president_dispatch_pace]] + [[feedback_root_cause_over_quick_fix]] 整合)。
+
+### 10.1 Prerequisite framework PR land (= 副次 finding 反映)
+
+**v0.1**: prerequisite = TextInput::on_change + hayate-kit 経由 `Renderer` /
+`ItemRect` / `TextEngine` / `alloc_widget_id` / `PopupId` re-export 計 5 件
+
+**v0.2 確定**:
+- PR #155 land 済 = `TextInputWidget::on_change` builder + `Renderer` /
+  `TextEngine` / `ItemRect` re-export 3 件追加 ✅
+- `alloc_widget_id` 不要化 (= worker2 case は wrapper widget の id() を
+  `inner.id()` delegate で代替、 stable inner ゆえ alloc 不要)
+- `PopupId` 不要化 (= ReactiveOverlayContainer は popup emitter ではない、
+  Widget trait default impl 経由で OverlayContainer に forward 委譲)
+
+**revision 根拠**: worker3 dispatch との distinction (= PRESIDENT 補強で明文化)
+= worker3 DetailContainerWidget は inner rebuild が前提で inner.id() 不安定、
+別途 framework PR #156 で alloc_widget_id 解禁が必要。 worker2 は inner stable
+ゆえ delegate で済む。
+
+### 10.2 AlertDialogContainer → ReactiveOverlayContainer rename + 設計大幅 simplify
+
+**v0.1 §2**: `AlertDialogContainer` = AlertDialog を内部に持つ thin wrapper、
+visible_state 観測 + show/hide forward + paint_overlay forward を担当
+
+**v0.2 確定**: `ReactiveOverlayContainer` = `hayate_kit::widget::overlay::OverlayContainer`
+を内部に持つ thin wrapper、 N 個の (overlay_id, State<bool>, last_observed,
+on_enter) bindings 経由で `show_overlay` / `hide_overlay` を forward
+
+**revision 根拠** (PRESIDENT 即決 Option A):
+- v0.1 §3 で議論された ZStack 不在問題は `hayate_kit::widget::overlay::OverlayContainer`
+  既存利用で完全解消 (= base widget + Vec<overlay widgets> + dimming + modal
+  event routing 既実装、 695 行)
+- paint_overlay 経路 / 親 paint 末尾 後段 描画 の 2 候補多択も解消 (= 第 3 の
+  解 = OverlayContainer 採用)
+- N modal 集約 (1 wrapper で複数 modal) → app builder の組み合わせ柔軟性向上
+- framework PR 不要、 wrapper code ~210 行に圧縮
+
+### 10.3 reset_confirm AlertDialog 採用 → VStack 統一 (v0.1 → v0.1.5 → v0.2)
+
+**v0.1**: reset_confirm 設計言及なし (= accent_picker のみ詳述)
+
+**v0.1.5** (= PRESIDENT 即決 Option A item 5 中間採択): reset_confirm =
+AlertDialog 直接利用 (= title + message + Cancel/Reset buttons で perfect fit、
+DialogKind::Question + on_result callback で State<bool> sync)
+
+**v0.2 確定** (= PRESIDENT 即決 Option β): reset_confirm = VStack 統一
+(= accent_picker と同 pattern: title Label + message Label + HStack { Cancel + Reset })
+
+**revision 根拠** (= worker2 Step 5 着手前 grep で 2 件 coordination 問題発見):
+1. **dual-visibility-source coordination 不可**:
+   - AlertDialog は内部 self.visible flag を保持 (alert_dialog.rs:104) + show/hide/visible (line 174/180/185)
+   - ReactiveOverlayContainer は OverlayContainer.entry.visible を State<bool> で駆動
+   - 2 visibility source 同期手段なし: `Box<dyn Widget>` 経由で AlertDialog の
+     `show()` inherent method は trait object 化により消滅、 外部から reach 不可
+   - 解消には StateDrivenAlertDialog wrapper widget 追加が必要 = consumer 側
+     band-aid、 [[feedback_platform_principle]] 緊張
+2. **double-dimming 視覚問題**:
+   - OverlayContainer.paint(): DIM_COLOR = [0,0,0,128] = alpha 128 dimming (overlay.rs:269-276)
+   - AlertDialog.paint(): parent_w/parent_h 全域に alpha=128 dimming (alert_dialog.rs:262-263)
+   - 重ね合わせ合成 alpha ≈ 192 (= 1 - (1-128/255)² ≈ 0.748)
+   - accent_picker (= VStack content) と reset_confirm (= AlertDialog) で
+     dimming alpha が非対称 → UI 一貫性損失
+
+**v0.2 採用の effect**:
+- 機能 lose ゼロ: AlertDialog 内蔵 Escape/Enter dismiss は ReactiveOverlayContainer
+  の Escape pre-intercept + Enter accept で代替済 (= §10.5 詳細)
+- 視覚一貫: 2 modal 共 alpha 128 dimming で対称
+- 構造 cohesion: 2 modal が VStack { title + content + HStack { buttons } } 同 pattern
+- 実装コスト最小: wrapper widget 不要、 build_reset_confirm 軽微 refactor (= title Label 追加のみ)
+- ETA 維持: 元 120 min 想定通り
+
+**棄却 option**:
+- Option α (StateDrivenAlertDialog wrapper 追加): consumer 側 band-aid、 double-dimming 残置
+- Option γ (OverlayContainer has_dimming flag 追加 framework PR): wave 3b scope 外、 ETA 延長
+
+### 10.4 完了基準 v0.2 (= §9 v0.1 基準の置換)
+
+- [x] commit `baca8fc` (= logic-only subset) preserved → HEAD lineage 維持
+- [x] framework PR #155 land 済 (= path dep ゆえ Cargo.toml bump 不要)
+- [x] state.rs: draft_accent_hex 追加 + 3 tests (Step 2)
+- [x] modals.rs: **ReactiveOverlayContainer** + LabelRef shim + 8 tests (Step 3)
+- [x] modals.rs: 動的 preview + WCAG ratio on TextInput::on_change + 8 tests (Step 4)
+- [x] modals.rs: build_reset_confirm VStack 統一 + ReactiveOverlayContainer Enter accept + 4 tests (Step 5)
+- [x] main.rs: ReactiveOverlayContainer { OverlayContainer { base: SplitView, overlays: [accent, reset] } } root mount (Step 5)
+- [x] docs/wave3b-modal-visual-design.md revision v0.1 → v0.2 embed (Step 6 = 本 commit)
+- [ ] cargo test --package hayate-kit-settings -j1 全 green (= 54 baseline + 23 視覚層 = 77 passed 想定)
+- [ ] cargo clippy --all-targets -j1 全 green
+- [ ] PR raise + codex 査読 + PRESIDENT 直接 merge
+
+### 10.5 採用 dismiss / accept 経路 (= §2.2 + §5.2 + §5.3 の v0.2 置換)
+
+- **Escape dismiss** = ReactiveOverlayContainer.event() 内 keysym `xkbcommon::xkb::Keysym::Escape`
+  pre-intercept → 最上位 visible binding の State<bool>.set(false) + inner.hide_overlay
+  - v0.1 doc 内 `hayate_kit::Key::Escape` 言及は誤り (= 該当 path 不存在、 grep 確定)
+  - 採用 path: `WidgetEvent::Key(KeyEvent { keysym, .. })` で `keysym: xkbcommon::xkb::Keysym`
+    field access、 hayate-kit 経由再 export 不在のため `xkbcommon` を Cargo.toml に
+    直 dep 追加 (= third-party crate ゆえ feedback_new_apps_depend_on_gui_kit_only 規範違反なし)
+- **Enter accept** = `Keysym::Return` / `Keysym::KP_Enter` pre-intercept →
+  最上位 visible binding に on_enter closure registered なら invoke (= Ok 系
+  button click と同等 action: accent は apply_accent_picker、 reset は apply_reset_confirm)、
+  closure 不在なら dismiss fallback
+- **外クリック dismiss** = wave 3b 範囲 **外** (= PRESIDENT 補強 A defer 確定)、
+  closeout phase で再評価予定。 残課題化により後世 re-discover 可能化。
+- **focus capture / Tab trap** = wave 3b 範囲 **外** (= 確定方針)、 worker2
+  既明記、 closeout phase で再評価予定。
+
+### 10.6 副次 finding (= 実装着手で発覚した framework gap、 framework PR 不要)
+
+- `hayate_kit::widget::widget_id::alloc_widget_id` 不在 (= hayate-platform 側のみ
+  実装、 hayate-kit 経由 re-export なし)
+  - 回避策: wrapper widget の id() は inner.id() delegate で代替、 framework PR 不要
+- `hayate_platform::platform::keyboard::{KeyEvent, KeyState, Modifiers}` 再 export 不在
+  - 影響: unit test 内 `WidgetEvent::Key` 構築不可 (= KeyEvent struct field access 要求)
+  - 回避策: dismiss_topmost_visible / accept_topmost_visible を pub(crate) fn
+    抽出、 key event 経路を経由せず直接 logic 呼出で test 可能化
+  - 残課題: 真の event-driven integration test は workspace level (= 統合
+    test crate) で実施推奨、 wave 3b scope 外
+- `hayate_platform::widget_themes::app::AppTheme` 再 export 不在
+  - 影響: LabelRef shim の inject_theme 完全 forward 不能
+  - 回避策: inject_theme default impl (= children_mut() empty で no-op) で十分
+    (= hayate-kit-settings は HAYATE_ORIGINAL theme + cosmic-text path 使用、
+    bitmap_default 未注入でも paint 正常)
