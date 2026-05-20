@@ -176,11 +176,18 @@ impl ReactiveOverlayContainer {
     /// Escape key pre-intercept から呼び出され、 全 binding が hidden の場合は
     /// 何もせず false を返す (= Escape を吸わない = base layer に届ける)。
     ///
-    /// 別 method 抽出理由 (= test 観点): event() 内 `WidgetEvent::Key` 構築は
-    /// `hayate_platform::platform::keyboard::KeyEvent` を要求し、 本 crate の
-    /// hayate-kit only 依存規範下では test code から synthesize 不可能。 dismiss
-    /// logic を method 化することで key event 経由のテストを迂回、 logic 自体を
-    /// 直接 assert 可能にする (= unit test boundary 設計)。
+    /// 別 method 抽出理由: event() が key pre-intercept から呼び出す共通 dismiss
+    /// logic の再利用単位 (= Escape handler と将来の外クリック handler 等が共有)。
+    /// 加えて last-visible priority / fallback / no-op といった fine-grained logic
+    /// を直接 assert する unit test boundary としても機能する。
+    ///
+    /// (履歴: wave 3b 時点では `WidgetEvent::Key` の payload 型 `KeyEvent` が
+    /// hayate-kit re-export 漏れで test code から synthesize 不可能だったため、
+    /// 本 method 直呼びが event() を test する唯一の手段だった。 wave 3c GUI_kit
+    /// PR #158 = feedback_widget_trait_forward_gap_pattern case 8 で
+    /// `hayate_kit::{KeyEvent, KeyState, Modifiers}` re-export が land し、 event()
+    /// 自体を `WidgetEvent::Key` 構築経由で end-to-end test 可能に。 本 method の
+    /// 直接 test は今や event() end-to-end test と相補的な fine-grained 層。)
     pub(crate) fn dismiss_topmost_visible(&mut self) -> bool {
         for binding in self.bindings.iter_mut().rev() {
             if *binding.state.get() {
@@ -338,6 +345,26 @@ impl Widget for LabelRef {
 mod tests {
     use super::*;
     use crate::state::for_testing;
+    use hayate_kit::{KeyEvent, KeyState, Modifiers};
+
+    /// Synthesize a `WidgetEvent::Key` for the given keysym (= Pressed, no mods)。
+    ///
+    /// `KeyEvent` / `KeyState` / `Modifiers` は GUI_kit PR #158
+    /// (= feedback_widget_trait_forward_gap_pattern case 8) の re-export で
+    /// hayate-kit only 依存規範下でも構築可能になった。 これにより event() の
+    /// Key pre-intercept path (Escape → dismiss / Enter → accept) を method
+    /// 直呼び迂回なしに end-to-end test できる。 production event() は keysym
+    /// のみ判定し KeyState を見ない (overlay.rs event() の comment 参照) ため
+    /// state は Pressed 固定で十分。
+    fn key_event(keysym: xkbcommon::xkb::Keysym) -> WidgetEvent {
+        WidgetEvent::Key(KeyEvent {
+            key: 0,
+            keysym,
+            utf8: None,
+            modifiers: Modifiers::default(),
+            state: KeyState::Pressed,
+        })
+    }
 
     /// Minimal stub widget for ReactiveOverlayContainer/LabelRef driver tests。
     /// production widget tree には登場しない (= `#[cfg(test)]` 配下のみ)。
@@ -600,6 +627,141 @@ mod tests {
         assert!(accepted);
         assert!(!accent_fired.get(), "accent (= 下層) は触らない");
         assert!(reset_fired.get(), "reset (= 末尾) のみ accept");
+    }
+
+    // ── event() Key pre-intercept end-to-end tests (= wave 3c item 4) ──
+    //
+    // 上記 dismiss_topmost_visible / accept_topmost_visible の直呼び test は
+    // method logic を fine-grained に検証する。 以下は GUI_kit PR #158 (case 8
+    // re-export) で初めて可能になった、 `WidgetEvent::Key` 構築 → event() への
+    // dispatch という end-to-end path の検証。 keysym → method routing
+    // (Escape→dismiss / Return・KP_Enter→accept) + 全 hidden 時 pass-through を
+    // cover する。
+
+    /// event() に Escape Key を渡すと最上位 visible overlay が dismiss され、
+    /// EventResponse::Handled を返す (= pre-intercept 成立)。
+    #[test]
+    fn event_escape_key_dismisses_topmost_visible_end_to_end() {
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        let mut roc = make_container_with_two_overlays(
+            state.accent_picker_visible.clone(),
+            state.reset_confirm_visible.clone(),
+        );
+
+        let resp = roc.event(&key_event(xkbcommon::xkb::Keysym::Escape));
+        assert_eq!(
+            resp,
+            EventResponse::Handled,
+            "visible overlay 上での Escape は event() で Handled"
+        );
+        assert!(
+            !*state.accent_picker_visible.get(),
+            "Escape が event() 経由で accent を dismiss した"
+        );
+    }
+
+    /// event() に Return Key を渡すと最上位 visible binding の on_enter closure が
+    /// 起動され、 Handled を返す (= accept pre-intercept 成立)。
+    #[test]
+    fn event_return_key_accepts_topmost_visible_end_to_end() {
+        use std::cell::Cell;
+        use std::rc::Rc as StdRc;
+
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        let mut roc = ReactiveOverlayContainer::new(Box::new(TestStub::new(1)));
+
+        let fired = StdRc::new(Cell::new(false));
+        let fired_c = StdRc::clone(&fired);
+        let state_c = state.clone();
+        roc.add_overlay_with_state_and_enter(
+            "accent",
+            Box::new(TestStub::new(2)),
+            OverlayPosition::Center,
+            state.accent_picker_visible.clone(),
+            move || {
+                fired_c.set(true);
+                state_c.accent_picker_visible.set(false);
+            },
+        );
+
+        let resp = roc.event(&key_event(xkbcommon::xkb::Keysym::Return));
+        assert_eq!(resp, EventResponse::Handled, "Return は event() で Handled");
+        assert!(fired.get(), "Return が on_enter closure を event() 経由で起動");
+        assert!(
+            !*state.accent_picker_visible.get(),
+            "on_enter closure が state を dismiss"
+        );
+    }
+
+    /// KP_Enter (テンキー Enter) も Return と同様に accept path を叩く。
+    #[test]
+    fn event_kp_enter_key_accepts_topmost_visible_end_to_end() {
+        use std::cell::Cell;
+        use std::rc::Rc as StdRc;
+
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        let mut roc = ReactiveOverlayContainer::new(Box::new(TestStub::new(1)));
+
+        let fired = StdRc::new(Cell::new(false));
+        let fired_c = StdRc::clone(&fired);
+        let state_c = state.clone();
+        roc.add_overlay_with_state_and_enter(
+            "accent",
+            Box::new(TestStub::new(2)),
+            OverlayPosition::Center,
+            state.accent_picker_visible.clone(),
+            move || {
+                fired_c.set(true);
+                state_c.accent_picker_visible.set(false);
+            },
+        );
+
+        let resp = roc.event(&key_event(xkbcommon::xkb::Keysym::KP_Enter));
+        assert_eq!(resp, EventResponse::Handled, "KP_Enter も Handled");
+        assert!(fired.get(), "KP_Enter が on_enter closure を起動");
+    }
+
+    /// 全 overlay hidden 時、 Escape は pre-intercept で吸われず (= dismiss 不発)、
+    /// state は不変のまま inner へ pass-through する (= base layer に届く)。
+    #[test]
+    fn event_escape_when_all_hidden_passes_through_without_state_change() {
+        let state = for_testing();
+        let mut roc = make_container_with_two_overlays(
+            state.accent_picker_visible.clone(),
+            state.reset_confirm_visible.clone(),
+        );
+
+        let resp = roc.event(&key_event(xkbcommon::xkb::Keysym::Escape));
+        // dismiss_topmost_visible が false を返すため pre-intercept は Handled を
+        // 返さず inner.event() に委譲される (= Escape を吸わない)。
+        assert_ne!(
+            resp,
+            EventResponse::Handled,
+            "全 hidden 時の Escape は pre-intercept で Handled にならない"
+        );
+        assert!(!*state.accent_picker_visible.get(), "state 不変");
+        assert!(!*state.reset_confirm_visible.get(), "state 不変");
+    }
+
+    /// 非 Escape/Enter の Key (= 例: 文字 'a') は pre-intercept 対象外で、
+    /// visible overlay があっても dismiss/accept しない。
+    #[test]
+    fn event_unrelated_key_does_not_trigger_pre_intercept() {
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        let mut roc = make_container_with_two_overlays(
+            state.accent_picker_visible.clone(),
+            state.reset_confirm_visible.clone(),
+        );
+
+        let _ = roc.event(&key_event(xkbcommon::xkb::Keysym::a));
+        assert!(
+            *state.accent_picker_visible.get(),
+            "無関係 key では accent は dismiss されず visible のまま"
+        );
     }
 
     // ── LabelRef shim tests (= dynamic preview/WCAG 配線基盤) ──
