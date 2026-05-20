@@ -28,7 +28,11 @@
 mod accent;
 mod overlay;
 mod reset;
-mod wcag;
+// `pub(crate)`: wave 3c track2 で sections/appearance.rs の inline accent row
+// (= Pick... trigger + dynamic WCAG label) が `compute_wcag_status` /
+// `parse_hex_or_default` を再利用するため module 全体を crate 内公開
+// (= WCAG helper 重複解消、 dispatch 「wcag.rs は pub(crate) で reach 可能」)。
+pub(crate) mod wcag;
 
 // ── 共有定数 (= submodule が `use super::` で参照) ──
 
