@@ -173,9 +173,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let runtime = ReactiveRuntime::new();
     let dirty_flag = runtime.scheduler().dirty_flag();
     // Phase 3a: persist された theme_id を move 前に取得 (= ThemeId は Copy)、
-    // 起動時 initial theme 解決に使用。 initial_config は直後 AppStateHandles へ move。
+    // 起動時 initial theme 解決に使用。 initial_config は App 構築後の
+    // AppStateHandles::new へ move (= theme_handle 注入のため App を先に構築する
+    // よう順序変更、 下記参照)。
     let initial_theme_id = initial_config.appearance.theme_id;
-    let app_state = AppStateHandles::new(&runtime, initial_config, cfg_path);
 
     // Normal launch: App builder chain = HAYATE Original 全 opt-in hard-baked
     // (= RFC v0.2 §1.3 「全 opt-in pattern hard-baked」規範整合)
@@ -208,6 +209,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &current_title,
     );
     let app = app.with_decorations(Decorations::SystemLike(chrome));
+
+    // Phase 3a: AppThemeHandle を取得して AppStateHandles に注入 (= Theme switcher
+    // ComboBox on_select → handle.set(app_theme_for(id)) で runtime theme swap)。
+    // App 構築後でないと app.app_theme() が呼べないため、 AppStateHandles::new を
+    // ここまで遅延 (= 上記 initial_theme_id を Copy で先取りした理由)。 handle は
+    // Rc cell を clone するだけなので app の builder move を跨いでも有効。
+    let theme_handle = app.app_theme();
+    let app_state =
+        AppStateHandles::new(&runtime, initial_config, cfg_path).with_theme_handle(theme_handle);
 
     // Phase 1 step 6 skeleton: SplitView { Sidebar (TreeView nav) + Detail pane }
     // HStack ではなく SplitView を使用する理由 (= R13 fix 後 visual re-verify で発覚):

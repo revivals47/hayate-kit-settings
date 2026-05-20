@@ -101,6 +101,18 @@ pub struct AppStateHandles {
     /// `~/.config/hayate-kit-settings/config.json` の絶対 path。 poll loop で
     /// `persistence::save(&*config.get(), &config_path)` 呼出に使用。
     pub config_path: PathBuf,
+    /// Runtime theme swap handle (= Phase 3a、 `App::app_theme()` 由来)。
+    /// Theme switcher ComboBox の `on_select` が `handle.set(app_theme_for(id))` で
+    /// app-wide theme を runtime 切替する。
+    ///
+    /// `Option` な理由: [`AppThemeHandle`] は `App::app_theme()` からのみ取得可能
+    /// (= 内部 `Rc` cell を共有)、 production では [`Self::with_theme_handle`] で
+    /// 必ず `Some` 注入されるが、 `App` を持たない test 構築 (= [`for_testing`] +
+    /// 既存 `AppStateHandles::new` 直接呼出の unit test) では `None`。 これにより
+    /// `new` の signature を 3-arg のまま保ち既存 test 群を無 churn で維持
+    /// (= 設計 trade-off: handle.set は GUI runtime 経路ゆえ unit test では
+    /// 元々 observe 不可、 None path で config/debouncer 側のみ test する)。
+    pub theme_handle: Option<AppThemeHandle>,
 }
 
 impl AppStateHandles {
@@ -121,7 +133,16 @@ impl AppStateHandles {
             draft_accent_hex: runtime.create_state(initial_accent),
             debouncer: Rc::new(RefCell::new(DebouncedSaver::new())),
             config_path,
+            theme_handle: None,
         }
+    }
+
+    /// Inject the runtime theme swap handle (= `App::app_theme()` 由来)。
+    /// production の `main` が `App` 構築後に呼ぶ builder。 chain 内で `Some` を
+    /// set した self を返すため、 sidebar / detail への clone 前に注入される。
+    pub fn with_theme_handle(mut self, handle: AppThemeHandle) -> Self {
+        self.theme_handle = Some(handle);
+        self
     }
 }
 

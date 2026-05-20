@@ -79,6 +79,51 @@ pub fn app_theme_for(id: ThemeId) -> AppTheme {
     }
 }
 
+/// Theme ComboBox の選択肢 (= `(ThemeId, 表示 label)` の単一 source of truth)。
+/// 表示順 = HayateOriginal (signature) を先頭、 以降 retro/vendor。 label ⇔
+/// ThemeId 双方向 map ([`theme_label_for`] / [`theme_id_from_label`]) の元。
+const THEME_CHOICES: [(ThemeId, &str); 6] = [
+    (ThemeId::HayateOriginal, "HAYATE Original"),
+    (ThemeId::Win95, "Windows 95"),
+    (ThemeId::XpLuna, "Windows XP"),
+    (ThemeId::Win10, "Windows 10"),
+    (ThemeId::MacOs9, "Mac OS 9"),
+    (ThemeId::MacOsBigSur, "macOS"),
+];
+
+/// [`ThemeId`] → ComboBox 表示 label。 [`THEME_CHOICES`] を引く。
+fn theme_label_for(id: ThemeId) -> &'static str {
+    THEME_CHOICES
+        .iter()
+        .find(|(tid, _)| *tid == id)
+        .map(|(_, label)| *label)
+        .unwrap_or("HAYATE Original")
+}
+
+/// ComboBox 表示 label → [`ThemeId`]。 未知 label は `None` (= 保守的 fallback、
+/// on_select 側で no-op、 destructive 上書き回避)。
+fn theme_id_from_label(label: &str) -> Option<ThemeId> {
+    THEME_CHOICES
+        .iter()
+        .find(|(_, l)| *l == label)
+        .map(|(tid, _)| *tid)
+}
+
+/// Theme ComboBox の `on_select` を反映: (1) theme_handle 経由 runtime swap
+/// (= `handle.set(app_theme_for(id))`、 production のみ Some)、 (2) config.theme_id
+/// 更新 + debouncer 発火 (= persist)。
+///
+/// handle が `None` (= test 構築) の場合は runtime swap を skip し config/debouncer
+/// のみ更新 (= handle.set は GUI runtime 経路で元々 unit test observe 不可、
+/// persist 側のみ assert する設計)。
+fn apply_theme_selection(state: &AppStateHandles, id: ThemeId) {
+    if let Some(handle) = state.theme_handle.as_ref() {
+        handle.set(app_theme_for(id));
+    }
+    state.config.update(|c| c.appearance.theme_id = id);
+    state.debouncer.borrow().request();
+}
+
 /// Build Appearance section widget tree。
 pub fn build(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widget> {
     let heading = LabelWidget::new(strings.section_appearance, 18.0);
@@ -142,19 +187,34 @@ pub fn build(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widg
         .row("Color mode", color_mode)
         .row("Accent color (hex)", accent_row);
 
-    // Theme サブセクション = Phase 3 hero feature defer の note。
+    // ── Theme サブセクション = Phase 3a theme switcher (6 skin runtime swap) ──
+    // 旧 defer note label を実 ComboBox に置換。 on_select → apply_theme_selection
+    // が theme_handle.set(app_theme_for(id)) で runtime swap + config.update +
+    // debouncer。 初期選択は persist された theme_id (= 起動時 app_theme_for と整合)。
     let theme_subheading = LabelWidget::new(strings.section_appearance_theme, 16.0);
-    let theme_defer_note = LabelWidget::new(
-        "Phase 3 で theme switcher (retro presets + HAYATE Original variants) を実装予定。",
-        13.0,
-    );
+    let theme_initial = state.config.get().appearance.theme_id;
+    let mut theme_combo = ComboBoxWidget::new(
+        THEME_CHOICES
+            .iter()
+            .map(|(_, label)| (*label).to_string())
+            .collect(),
+    )
+    .on_select({
+        let s = state.clone();
+        move |selected| {
+            if let Some(id) = theme_id_from_label(selected) {
+                apply_theme_selection(&s, id);
+            }
+        }
+    });
+    theme_combo.set_text(theme_label_for(theme_initial));
 
     let mut stack = VStack::new(16.0);
     stack = stack.add(Box::new(heading));
     stack = stack.add(Box::new(form));
     stack = stack.add(wcag_widget);
     stack = stack.add(Box::new(theme_subheading));
-    stack = stack.add(Box::new(theme_defer_note));
+    stack = stack.add(Box::new(theme_combo));
     Box::new(stack)
 }
 
@@ -297,6 +357,64 @@ mod tests {
             hayate.button.bg, win95.button.bg,
             "HayateOriginal と Win95 は異なる button bg (= 同一 preset 返却バグ検出)"
         );
+    }
+
+    /// label ⇔ ThemeId 双方向 map が全 6 variant で round-trip する。
+    #[test]
+    fn theme_label_id_round_trip_all_variants() {
+        for (id, label) in THEME_CHOICES {
+            assert_eq!(theme_label_for(id), label, "id → label");
+            assert_eq!(theme_id_from_label(label), Some(id), "label → id");
+        }
+    }
+
+    /// 未知 label は None (= on_select で no-op、 destructive 上書き回避)。
+    #[test]
+    fn theme_id_from_unknown_label_is_none() {
+        assert_eq!(theme_id_from_label("Sepia (future)"), None);
+        assert_eq!(theme_id_from_label(""), None);
+    }
+
+    /// Theme ComboBox on_select 相当: apply_theme_selection が config.theme_id を
+    /// 更新 + debouncer 発火する (= persist 側、 handle.set は None path で skip)。
+    /// handle.set → runtime swap は GUI runtime 経路ゆえ unit test では観測不可、
+    /// visual smoke (user) で確認。
+    #[test]
+    fn apply_theme_selection_updates_config_and_requests_save() {
+        let state = crate::state::for_testing();
+        // for_testing は theme_handle = None (= App 不在)、 handle.set は skip され
+        // config/debouncer のみ更新される path を assert。
+        assert!(state.theme_handle.is_none(), "for_testing は handle None");
+        assert_eq!(
+            state.config.get().appearance.theme_id,
+            ThemeId::HayateOriginal,
+            "initial = default"
+        );
+        apply_theme_selection(&state, ThemeId::Win95);
+        assert_eq!(
+            state.config.get().appearance.theme_id,
+            ThemeId::Win95,
+            "config.theme_id 反映"
+        );
+        assert!(
+            state.debouncer.borrow().has_pending(),
+            "debouncer 発火 (= persist 予約)"
+        );
+    }
+
+    /// apply_theme_selection は他の appearance config field を touch しない
+    /// (= theme_id のみ更新、 accent_hex / font_size_scale 不変)。
+    #[test]
+    fn apply_theme_selection_leaves_other_appearance_fields_intact() {
+        let state = crate::state::for_testing();
+        let accent_before = state.config.get().appearance.accent_hex.clone();
+        let font_before = state.config.get().appearance.font_size_scale;
+        apply_theme_selection(&state, ThemeId::MacOs9);
+        assert_eq!(state.config.get().appearance.accent_hex, accent_before);
+        assert!(
+            (state.config.get().appearance.font_size_scale - font_before).abs() < f32::EPSILON
+        );
+        assert_eq!(state.config.get().appearance.theme_id, ThemeId::MacOs9);
     }
 
     #[test]
