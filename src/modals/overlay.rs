@@ -251,9 +251,12 @@ impl Widget for ReactiveOverlayContainer {
     fn event(&mut self, event: &WidgetEvent) -> EventResponse {
         self.sync_bindings();
         // Key pre-intercept (= Escape / Return / KP_Enter)。
-        // keysym のみ判定、 KeyState は再 export 不在のため state filter なし。
-        // idempotent (= release 等で重複発火しても hide/state.set/closure は
-        // 冪等 or 自己責務) のため Pressed limited filter は不要。
+        // 現実装は keysym のみ判定し KeyState (Pressed/Released) で filter しない。
+        // dismiss / accept は idempotent (= release 等で重複発火しても
+        // hide_overlay / state.set(false) / on_enter closure は冪等 or 自己責務)
+        // なので Pressed 限定 filter を設けていない (= 設計選択であって制約ではない。
+        // KeyState は case 8 = GUI_kit PR #158 で re-export 済、 必要なら
+        // `ke.state` で filter 可能だが本 path では不要)。
         if let WidgetEvent::Key(ke) = event {
             let ks = ke.keysym;
             if ks == xkbcommon::xkb::Keysym::Escape && self.dismiss_topmost_visible() {
