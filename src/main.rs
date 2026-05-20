@@ -172,17 +172,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // AppStateHandles の両方が共有する形で配線 (= State<T> 変更 → 自動 repaint trigger)
     let runtime = ReactiveRuntime::new();
     let dirty_flag = runtime.scheduler().dirty_flag();
+    // Phase 3a: persist された theme_id を move 前に取得 (= ThemeId は Copy)、
+    // 起動時 initial theme 解決に使用。 initial_config は直後 AppStateHandles へ move。
+    let initial_theme_id = initial_config.appearance.theme_id;
     let app_state = AppStateHandles::new(&runtime, initial_config, cfg_path);
 
     // Normal launch: App builder chain = HAYATE Original 全 opt-in hard-baked
     // (= RFC v0.2 §1.3 「全 opt-in pattern hard-baked」規範整合)
     // Decorations::SystemLike + build_systemlike で close/min/max button 標準装備
+    // Phase 3a: 起動時 initial theme = 永続化された theme_id から解決
+    // (= app_theme_for mapping)。 旧 config (theme_id 不在) は serde(default) で
+    // HayateOriginal に補完されるため、 従来 hard-coded app_theme_hayate_original()
+    // と同一 default 挙動を維持しつつ、 persist された skin を起動時に復元する。
     let titlebar = titlebar_theme_hayate_original();
     let policy = WindowPolicy::default();
+    let initial_theme = crate::sections::appearance::app_theme_for(initial_theme_id);
     let app = App::new(strings.app_title, 800, 540)
         .with_theme(&HAYATE_ORIGINAL)
         .with_titlebar_theme(titlebar.clone())
-        .with_app_theme(app_theme_hayate_original())
+        .with_app_theme(initial_theme)
         .with_window_policy(policy.clone())
         .with_min_size(560, 400)
         .with_reactive(dirty_flag);

@@ -124,6 +124,32 @@ pub enum LogLevel {
     Error,
 }
 
+/// App-wide theme 選好 (= Phase 3a theme switcher、 Appearance section の Theme
+/// ComboBox に対応)。 6 skin を runtime swap 可能。 default = HayateOriginal
+/// (= 新世代 app 第 1 号の signature aesthetic)。
+///
+/// `app_theme_for` ([`crate::sections::appearance::app_theme_for`]) で対応する
+/// GUI_kit `AppTheme` preset に map する。 serde wire format は snake_case
+/// (= `hayate_original` / `win95` / `xp_luna` / `win10` / `mac_os9` /
+/// `macos_big_sur`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeId {
+    /// HAYATE Original (風韻 fuuin aesthetic、 風藍 accent)。
+    #[default]
+    HayateOriginal,
+    /// Windows 95 classic (= 品質基準 skin)。
+    Win95,
+    /// Windows XP Luna。
+    XpLuna,
+    /// Windows 10 Fluent。
+    Win10,
+    /// Mac OS 9 Platinum。
+    MacOs9,
+    /// Modern macOS (Big Sur+)。
+    MacOsBigSur,
+}
+
 // ── section nested structs ──────────────────────────────────────────────
 
 /// General section (= RFC v0.5 §5.2.1) persisted state。
@@ -163,6 +189,11 @@ pub struct AppearanceConfig {
     /// hex validation + WCAG warning re-evaluation は wave 3 reactive bind 側)。
     #[serde(default = "default_accent_hex")]
     pub accent_hex: String,
+    /// App-wide theme 選好 (= Phase 3a theme switcher、 起動時 load → 初期 theme、
+    /// runtime swap で更新)。 旧 config (theme_id 不在) は serde(default) で
+    /// HayateOriginal に補完。
+    #[serde(default)]
+    pub theme_id: ThemeId,
 }
 
 impl Default for AppearanceConfig {
@@ -171,6 +202,7 @@ impl Default for AppearanceConfig {
             font_size_scale: 14.0,
             color_mode: ColorMode::default(),
             accent_hex: default_accent_hex(),
+            theme_id: ThemeId::default(),
         }
     }
 }
@@ -520,6 +552,34 @@ mod tests {
         assert!((a.font_size_scale - 14.0).abs() < f32::EPSILON);
         assert_eq!(a.color_mode, ColorMode::Dark);
         assert_eq!(a.accent_hex, "#5A8BA8");
+        // Phase 3a: default theme = HayateOriginal (= signature aesthetic)。
+        assert_eq!(a.theme_id, ThemeId::HayateOriginal);
+    }
+
+    #[test]
+    fn theme_id_round_trips_through_json_and_wire_format() {
+        // Phase 3a: theme_id persist round-trip + serde wire format (snake_case)。
+        let mut c = Config::default();
+        c.appearance.theme_id = ThemeId::Win95;
+        let json = save_to_string(&c).expect("serialize");
+        assert!(
+            json.contains("\"win95\""),
+            "wire format = snake_case (got: {json})"
+        );
+        let back = load_from_str(&json);
+        assert_eq!(back.appearance.theme_id, ThemeId::Win95);
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn theme_id_absent_in_old_config_defaults_to_hayate_original() {
+        // 旧 config (theme_id field 不在) → serde(default) で HayateOriginal 補完。
+        let raw = r##"{
+            "version": 1,
+            "appearance": { "font_size_scale": 14.0, "color_mode": "dark", "accent_hex": "#5A8BA8" }
+        }"##;
+        let c = load_from_str(raw);
+        assert_eq!(c.appearance.theme_id, ThemeId::HayateOriginal);
     }
 
     #[test]

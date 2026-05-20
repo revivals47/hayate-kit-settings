@@ -34,11 +34,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use hayate_kit::prelude::*;
+// AppTheme type は prelude の nested module 内 re-export で glob 非到達のため
+// crate root から明示 import (= app_theme_for の戻り型)。
+use hayate_kit::AppTheme;
+// 6 skin AppTheme preset。 app_theme_hayate_original は prelude 経由 reach 済、
+// 残 5 件は full path で明示 import (= Phase 3a theme switcher の app_theme_for mapping)。
+use hayate_kit::style::widget_theme_presets::app::{
+    app_theme_mac_os9, app_theme_macos_big_sur, app_theme_win10, app_theme_win95, app_theme_xp_luna,
+};
 
 use crate::lang::Strings;
 use crate::modals::wcag::{compute_wcag_status, parse_hex_or_default};
 use crate::modals::LabelRef;
-use crate::persistence::ColorMode;
+use crate::persistence::{ColorMode, ThemeId};
 use crate::state::AppStateHandles;
 
 /// HAYATE Original default accent (= `#5A8BA8` 風藍、 RFC v0.2 §3 design language)。
@@ -49,6 +57,27 @@ const DEFAULT_ACCENT_HEX: &str = "#5A8BA8";
 const COLOR_MODE_LIGHT: &str = "Light";
 const COLOR_MODE_DARK: &str = "Dark";
 const COLOR_MODE_SYSTEM: &str = "System (Phase 4 defer)";
+
+/// Map a [`ThemeId`] to its GUI_kit [`AppTheme`] preset (= Phase 3a theme
+/// switcher の中核 mapping)。 linux-gallery `chrome.rs` の `ThemeId::app_theme`
+/// pattern を reuse、 ただし全 6 variant が実 preset を返す (= HayateOriginal も
+/// `None` ではなく `app_theme_hayate_original()`)。
+///
+/// 起動時 (`main.rs` の `with_app_theme`) と runtime swap (= Theme ComboBox
+/// `on_select` → `theme_handle.set(app_theme_for(id))`、 handle 依存部は
+/// re-export land 後配線) の両方が本 fn を経由する。 `match` は exhaustive
+/// (= `_` arm なし) なので、 将来 [`ThemeId`] に variant 追加時は本 fn が
+/// compile error で漏れを検出する。
+pub fn app_theme_for(id: ThemeId) -> AppTheme {
+    match id {
+        ThemeId::HayateOriginal => app_theme_hayate_original(),
+        ThemeId::Win95 => app_theme_win95(),
+        ThemeId::XpLuna => app_theme_xp_luna(),
+        ThemeId::Win10 => app_theme_win10(),
+        ThemeId::MacOs9 => app_theme_mac_os9(),
+        ThemeId::MacOsBigSur => app_theme_macos_big_sur(),
+    }
+}
 
 /// Build Appearance section widget tree。
 pub fn build(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widget> {
@@ -224,6 +253,50 @@ mod tests {
         let state = crate::state::for_testing();
         let _ja = build(Lang::Ja.strings(), &state);
         let _en = build(Lang::En.strings(), &state);
+    }
+
+    // ── Phase 3a: ThemeId <-> AppTheme mapping ─────────────────────────
+
+    /// app_theme_for は 6 variant 全てで panic せず AppTheme を返す + 正しい
+    /// preset に map する (= HayateOriginal → app_theme_hayate_original 等を
+    /// button.bg field で identity 確認)。 match exhaustive なので variant 漏れは
+    /// compile-time で別途保証。
+    #[test]
+    fn app_theme_for_maps_each_variant_to_its_preset() {
+        // HayateOriginal / Win95 を代表 identity 確認 (= 正しい preset へ map)。
+        assert_eq!(
+            app_theme_for(ThemeId::HayateOriginal).button.bg,
+            app_theme_hayate_original().button.bg,
+            "HayateOriginal → app_theme_hayate_original"
+        );
+        assert_eq!(
+            app_theme_for(ThemeId::Win95).button.bg,
+            app_theme_win95().button.bg,
+            "Win95 → app_theme_win95"
+        );
+        // 全 6 variant smoke (= panic なく construct)。
+        for id in [
+            ThemeId::HayateOriginal,
+            ThemeId::Win95,
+            ThemeId::XpLuna,
+            ThemeId::Win10,
+            ThemeId::MacOs9,
+            ThemeId::MacOsBigSur,
+        ] {
+            let _theme = app_theme_for(id);
+        }
+    }
+
+    /// 異なる ThemeId は識別可能な AppTheme を返す (= mapping が定数ではない)。
+    /// HayateOriginal (白 button bg) vs Win95 (灰 button bg) を button.bg で対比。
+    #[test]
+    fn app_theme_for_distinct_themes_differ() {
+        let hayate = app_theme_for(ThemeId::HayateOriginal);
+        let win95 = app_theme_for(ThemeId::Win95);
+        assert_ne!(
+            hayate.button.bg, win95.button.bg,
+            "HayateOriginal と Win95 は異なる button bg (= 同一 preset 返却バグ検出)"
+        );
     }
 
     #[test]
