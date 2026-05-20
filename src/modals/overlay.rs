@@ -302,6 +302,31 @@ impl Widget for ReactiveOverlayContainer {
     fn inject_engine(&mut self, engine: Rc<RefCell<TextEngine>>) {
         self.inner.inject_engine(engine);
     }
+
+    // ── popup 系 3 callback の明示 forward (= dropdown regression root-fix) ──
+    //
+    // Widget trait の popup 系 callback の default impl は `children_mut()` へ
+    // forward するが、 ReactiveOverlayContainer は `children_mut()` を override
+    // せず inner を露出しないため、 default では inner (= OverlayContainer →
+    // base SplitView 内の ComboBox) に届かず popup_request が root 不達 = 全
+    // ComboBox dropdown が開かない regression を生む (= wave 3b PR #8 で
+    // feedback_widget_trait_forward_gap_pattern case 1 が再発)。
+    //
+    // paint/event/layout/inject_engine と同じく self.inner へ明示 forward する
+    // ことで inner ComboBox の popup callback を root まで貫通させる。 型は
+    // hayate_kit::prelude::widget_impl 経由 reach (= GUI_kit PR #163 case 10
+    // root-fix で re-export 済)。
+    fn popup_request(&mut self) -> Option<PopupRequest> {
+        self.inner.popup_request()
+    }
+
+    fn paint_popup(&mut self, renderer: &mut Renderer, id: PopupId) {
+        self.inner.paint_popup(renderer, id);
+    }
+
+    fn on_popup_dismissed(&mut self, token: PopupWidgetToken) {
+        self.inner.on_popup_dismissed(token);
+    }
 }
 
 // ── LabelRef shim (= wave 3b dynamic preview/WCAG 配線基盤) ──
@@ -925,5 +950,88 @@ mod tests {
         assert!(!handle.borrow().dirty(), "clear_dirty 後 dirty=false");
         handle.borrow_mut().set_text("dirty trigger");
         assert!(handle.borrow().dirty(), "set_text 後 dirty=true (= 再 paint trigger)");
+    }
+
+    // ── popup callback forward regression guard (= dropdown 全滅 root-fix) ──
+    //
+    // PopupRequest は PopupConfig (= move-only、 hayate-kit 未 re-export) を要し
+    // hayate_kit only 依存規範下で `Some(..)` を構築できないため、 戻り値ではなく
+    // 「inner child の callback が **呼ばれたか**」を probe で記録して forward 成立を
+    // 機械的に証明する。 fix 前 (= default children_mut() forward、 ReactiveOverlay-
+    // Container は children_mut 未 override で空) なら probe に届かず flag が false の
+    // まま = test fail。 fix 後 (= self.inner へ明示 forward) なら届いて flag が true。
+
+    /// inner child に置いて popup callback の到達を記録する probe widget。
+    struct PopupProbe {
+        id: WidgetId,
+        popup_requested: Rc<std::cell::Cell<bool>>,
+        dismissed_token: Rc<RefCell<Option<PopupWidgetToken>>>,
+    }
+
+    impl PopupProbe {
+        fn new(
+            raw_id: u64,
+        ) -> (
+            Self,
+            Rc<std::cell::Cell<bool>>,
+            Rc<RefCell<Option<PopupWidgetToken>>>,
+        ) {
+            let requested = Rc::new(std::cell::Cell::new(false));
+            let dismissed = Rc::new(RefCell::new(None));
+            let probe = Self {
+                id: WidgetId(raw_id),
+                popup_requested: Rc::clone(&requested),
+                dismissed_token: Rc::clone(&dismissed),
+            };
+            (probe, requested, dismissed)
+        }
+    }
+
+    impl Widget for PopupProbe {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+        fn layout(&mut self, _c: &Constraints) -> Size {
+            Size::new(10.0, 10.0)
+        }
+        fn paint(&mut self, _r: &mut Renderer, _rect: ItemRect) {}
+        fn popup_request(&mut self) -> Option<PopupRequest> {
+            // 呼ばれたことを記録 (= forward 到達の証明)。 PopupRequest は構築不能
+            // のため戻り値は None で良い (= test は call 到達のみを assert)。
+            self.popup_requested.set(true);
+            None
+        }
+        fn on_popup_dismissed(&mut self, token: PopupWidgetToken) {
+            *self.dismissed_token.borrow_mut() = Some(token);
+        }
+    }
+
+    /// `ReactiveOverlayContainer::popup_request()` が inner (= OverlayContainer
+    /// → base) の child まで forward されること。 fix 前は default children_mut()
+    /// forward (空) で probe に届かず regression。
+    #[test]
+    fn popup_request_forwards_through_to_inner_child() {
+        let (probe, requested, _) = PopupProbe::new(99);
+        let mut roc = ReactiveOverlayContainer::new(Box::new(probe));
+        let _ = roc.popup_request();
+        assert!(
+            requested.get(),
+            "popup_request must reach inner child (= dropdown 全滅 regression guard)"
+        );
+    }
+
+    /// `ReactiveOverlayContainer::on_popup_dismissed()` が inner child まで
+    /// forward され、 同一 token が届くこと。
+    #[test]
+    fn on_popup_dismissed_forwards_through_to_inner_child() {
+        let (probe, _, dismissed) = PopupProbe::new(98);
+        let mut roc = ReactiveOverlayContainer::new(Box::new(probe));
+        let token = PopupWidgetToken(42);
+        roc.on_popup_dismissed(token);
+        assert_eq!(
+            *dismissed.borrow(),
+            Some(token),
+            "on_popup_dismissed must reach inner child with same token"
+        );
     }
 }
