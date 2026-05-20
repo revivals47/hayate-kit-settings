@@ -327,6 +327,48 @@ impl Widget for ReactiveOverlayContainer {
     fn on_popup_dismissed(&mut self, token: PopupWidgetToken) {
         self.inner.on_popup_dismissed(token);
     }
+
+    // ── overlay-pass + theme + drag-finished forward (= dropdown regression
+    // 完遂、 Step 2) ──
+    //
+    // popup_request 系と同根の gap: これら 4 callback の Widget trait default は
+    // `children_mut()` 経由 forward だが、 ReactiveOverlayContainer は inner を
+    // 露出せず children_mut() を override しないため inner (= OverlayContainer →
+    // base SplitView 内の ComboBox) に届かない。 paint_overlay / event_overlay の
+    // 不達が ComboBox dropdown を描画不可・操作不可にしていた user blocker の
+    // 真因 (= popup_request 取違えの PR #17 では不足だった機構)。 inject_theme は
+    // Phase 3a runtime theme swap が content 不達の latent bug、 on_drag_finished は
+    // broadcast family の漏れ。 GUI_kit OverlayContainer ADD 4 (PR #164) と完全
+    // symmetric に self.inner へ明示 forward する。 型は prelude::widget_impl 経由
+    // reach (Renderer/WidgetEvent/EventResponse + AppTheme + DragOutcome = case 11
+    // PR #165 で re-export 済)。
+    //
+    // DEFER 2 (on_drag_event / on_drag_start = bounds-aware routing、 broadcast で
+    // ない) は OverlayContainer と同方針で本 PR 非対象 (= DnD-through-overlay 需要
+    // 発生時の focused follow-up)。 N/A (children_mut) も同様 override せず明示
+    // forward 方針。
+    //
+    // paint_overlay / event_overlay は overlay visibility に依存するため、
+    // paint / event / layout と同じく冒頭で sync_bindings() を呼び inner の
+    // overlay 可視状態を最新化してから forward する。 inject_theme /
+    // on_drag_finished は visibility 非依存 broadcast ゆえ pure pass-through。
+    fn paint_overlay(&mut self, renderer: &mut Renderer) {
+        self.sync_bindings();
+        self.inner.paint_overlay(renderer);
+    }
+
+    fn event_overlay(&mut self, event: &WidgetEvent) -> EventResponse {
+        self.sync_bindings();
+        self.inner.event_overlay(event)
+    }
+
+    fn inject_theme(&mut self, theme: Rc<AppTheme>) {
+        self.inner.inject_theme(theme);
+    }
+
+    fn on_drag_finished(&mut self, outcome: DragOutcome) {
+        self.inner.on_drag_finished(outcome);
+    }
 }
 
 // ── LabelRef shim (= wave 3b dynamic preview/WCAG 配線基盤) ──
@@ -473,6 +515,90 @@ mod tests {
             reset_state,
         );
         roc
+    }
+
+    /// Shared call-count flags for [`ForwardProbe`]'s symmetric-4 callbacks。
+    #[derive(Clone, Default)]
+    struct ForwardFlags {
+        paint_overlay: Rc<std::cell::Cell<u32>>,
+        event_overlay: Rc<std::cell::Cell<u32>>,
+        theme: Rc<std::cell::Cell<u32>>,
+        drag_finished: Rc<std::cell::Cell<u32>>,
+    }
+
+    /// Probe base widget recording the symmetric-4 forwards (= overlay-pass +
+    /// theme + drag-finished) via shared [`ForwardFlags`]。 ReactiveOverlayContainer
+    /// が self.inner → base へ forward することを assert する (= Step 2 の gap fix)。
+    struct ForwardProbe {
+        id: WidgetId,
+        flags: ForwardFlags,
+    }
+
+    impl ForwardProbe {
+        fn new(raw_id: u64) -> (Self, ForwardFlags) {
+            let flags = ForwardFlags::default();
+            let probe = Self {
+                id: WidgetId(raw_id),
+                flags: flags.clone(),
+            };
+            (probe, flags)
+        }
+    }
+
+    impl Widget for ForwardProbe {
+        fn id(&self) -> WidgetId {
+            self.id
+        }
+        fn layout(&mut self, _c: &Constraints) -> Size {
+            Size::new(100.0, 50.0)
+        }
+        fn paint(&mut self, _r: &mut Renderer, _rect: ItemRect) {}
+        fn paint_overlay(&mut self, _r: &mut Renderer) {
+            self.flags.paint_overlay.set(self.flags.paint_overlay.get() + 1);
+        }
+        fn event_overlay(&mut self, _e: &WidgetEvent) -> EventResponse {
+            self.flags.event_overlay.set(self.flags.event_overlay.get() + 1);
+            EventResponse::Ignored
+        }
+        fn inject_theme(&mut self, _t: Rc<AppTheme>) {
+            self.flags.theme.set(self.flags.theme.get() + 1);
+        }
+        fn on_drag_finished(&mut self, _o: DragOutcome) {
+            self.flags.drag_finished.set(self.flags.drag_finished.get() + 1);
+        }
+    }
+
+    /// Step 2 regression: ReactiveOverlayContainer の symmetric-4 forward が
+    /// self.inner 経由で base に到達する (= paint_overlay/event_overlay は dropdown
+    /// 描画・操作 blocker、 inject_theme は theme swap content 反映、 on_drag_finished
+    /// は broadcast)。 OverlayContainer ADD 4 (PR #164) と完全 symmetric。
+    #[test]
+    fn reactive_overlay_forwards_symmetric_four_to_base() {
+        let (base, flags) = ForwardProbe::new(1);
+        let mut roc = ReactiveOverlayContainer::new(Box::new(base));
+
+        // paint_overlay → inner → base
+        let mut buf = vec![0u8; 64 * 64 * 4];
+        let mut r = Renderer::Cpu {
+            canvas: &mut buf,
+            stride: 64 * 4,
+            width: 64,
+            height: 64,
+        };
+        roc.paint_overlay(&mut r);
+        assert_eq!(flags.paint_overlay.get(), 1, "paint_overlay reached base (dropdown 描画)");
+
+        // event_overlay → inner → base (no visible overlay → falls to base)
+        roc.event_overlay(&WidgetEvent::PointerMove { x: 1.0, y: 1.0 });
+        assert_eq!(flags.event_overlay.get(), 1, "event_overlay reached base (dropdown 操作)");
+
+        // inject_theme → inner → base (= Phase 3a theme swap が content 反映)
+        roc.inject_theme(Rc::new(AppTheme::default()));
+        assert_eq!(flags.theme.get(), 1, "inject_theme reached base (theme swap)");
+
+        // on_drag_finished → inner → base broadcast
+        roc.on_drag_finished(DragOutcome::Cancelled);
+        assert_eq!(flags.drag_finished.get(), 1, "on_drag_finished reached base");
     }
 
     /// initial state が true のまま add すると即 visible 同期される。
@@ -969,6 +1095,10 @@ mod tests {
     }
 
     impl PopupProbe {
+        // 戻り型は probe 用の 3-tuple (= widget + 2 観測 handle)。 test helper
+        // ゆえ type alias 化せず allow (= pre-existing、 Step 2 で --all-targets
+        // 緑化のため scoped allow を付与)。
+        #[allow(clippy::type_complexity)]
         fn new(
             raw_id: u64,
         ) -> (
