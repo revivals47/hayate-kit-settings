@@ -186,11 +186,20 @@ fn parse_color_mode(label: &str) -> Option<ColorMode> {
     }
 }
 
-/// `Pick...` button on_click action: accent picker modal を起動する
-/// (= `state.accent_picker_visible.set(true)`)。 main.rs `ReactiveOverlayContainer`
-/// の binding が次 frame sync で overlay を show する。 従来 trigger 皆無で
-/// dormant だった modal をユーザー操作で起動可能にする wave 3c の核。
+/// `Pick...` button on_click action: accent picker modal を起動する。
+///
+/// 起動前に `draft_accent_hex` を現 config 値で re-seed する (= stale draft
+/// 防止、 codex PR #11 finding)。 Pick... trigger で dormant modal が初めて
+/// 実運用到達可能になったため、 インライン Accent color (hex) 編集後 or 過去
+/// modal cancel 後に open すると stale draft が表示される bug を補完。
+/// [`crate::modals::cancel_accent_picker`] の cancel/reset 後 re-seed と同
+/// family の invariant を trigger 経路でも保証する。
+///
+/// その後 `accent_picker_visible.set(true)` で main.rs `ReactiveOverlayContainer`
+/// の binding が次 frame sync で overlay を show する。
 fn open_accent_picker(state: &AppStateHandles) {
+    let current = state.config.get().appearance.accent_hex.clone();
+    state.draft_accent_hex.set(current);
     state.accent_picker_visible.set(true);
 }
 
@@ -273,7 +282,8 @@ mod tests {
     }
 
     /// open_accent_picker は config / debouncer を一切 touch しない
-    /// (= 純粋に modal 起動のみ、 hex 反映は modal 内 Apply path の責務)。
+    /// (= modal 起動 + draft re-seed のみ、 config commit は modal 内 Apply path
+    /// の責務、 debouncer も Apply まで発火しない)。
     #[test]
     fn open_accent_picker_does_not_touch_config_or_debouncer() {
         let state = crate::state::for_testing();
@@ -281,6 +291,41 @@ mod tests {
         open_accent_picker(&state);
         assert_eq!(*state.config.get(), snapshot, "config 不変");
         assert!(!state.debouncer.borrow().has_pending(), "save request なし");
+    }
+
+    /// codex PR #11 finding regression: open 時に draft_accent_hex が現 config
+    /// 値で re-seed される (= stale draft 防止)。 config を non-default に seed
+    /// してから draft を別値に汚した状態で open → draft が config 値へ復元
+    /// されることを fixation (= 誤って set(true) のみで draft 据置の実装は fail)。
+    #[test]
+    fn open_accent_picker_reseeds_draft_to_current_config() {
+        let state = crate::state::for_testing();
+
+        // config を non-default 値に seed (= "current config" を明示化)
+        let current_config_hex = String::from("#FF0000");
+        state
+            .config
+            .update(|c| c.appearance.accent_hex = current_config_hex.clone());
+
+        // draft を stale 値に汚す (= 過去 inline 編集 / modal cancel 漏れ simulate)
+        let stale_draft = String::from("#00FF00");
+        state.draft_accent_hex.set(stale_draft.clone());
+        assert_ne!(
+            *state.draft_accent_hex.get(),
+            current_config_hex,
+            "test fixation 前提: open 前は draft が config と乖離 (= stale)"
+        );
+
+        // open → draft が現 config 値に re-seed
+        open_accent_picker(&state);
+        assert_eq!(
+            *state.draft_accent_hex.get(),
+            current_config_hex,
+            "open で draft が現 config 値 ({}) に re-seed (= stale draft 防止、 \
+             set(true) のみで draft 据置の実装は本 assert で fail)",
+            current_config_hex
+        );
+        assert!(*state.accent_picker_visible.get(), "modal visible = true");
     }
 
     /// dynamic WCAG: refresh_wcag_label が入力 hex で label text を再計算更新。
