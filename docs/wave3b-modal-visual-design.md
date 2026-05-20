@@ -512,8 +512,12 @@ DialogKind::Question + on_result callback で State<bool> sync)
   最上位 visible binding に on_enter closure registered なら invoke (= Ok 系
   button click と同等 action: accent は apply_accent_picker、 reset は apply_reset_confirm)、
   closure 不在なら dismiss fallback
-- **外クリック dismiss** = wave 3b 範囲 **外** (= PRESIDENT 補強 A defer 確定)、
-  closeout phase で再評価予定。 残課題化により後世 re-discover 可能化。
+- **外クリック dismiss** = **A2 で実装済** (wave 3b/3c で連続 defer の後)。
+  GUI_kit framework method `OverlayContainer::point_outside_visible_overlays`
+  (= PR #159、 overlay rect hit-test) land → hayate-kit-settings 側 event() に
+  `PointerPress` pre-intercept 配線 (= has_visible_overlay() gate →
+  point_outside_visible_overlays(x,y) で backdrop click 判定 → dismiss_topmost_visible)。
+  座標 (x,y) は widget-local = container-local (root 近傍 wrap、 translate なし)。
 - **focus capture / Tab trap** = wave 3b 範囲 **外** (= 確定方針)、 worker2
   既明記、 closeout phase で再評価予定。
 

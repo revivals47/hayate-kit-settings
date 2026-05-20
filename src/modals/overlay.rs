@@ -27,7 +27,8 @@ use hayate_kit::{
 // - State<bool> 観測 = paint/layout/event 冒頭で sync_bindings()、 idempotent
 // - Escape pre-intercept = 最上位 visible overlay の State<bool>.set(false)
 //   (= AlertDialog 内蔵 Escape dismiss と二重発火しても idempotent)
-// - 外クリック dismiss は本 wave scope 外 (= PRESIDENT 補強 A defer 決定)
+// - 外クリック dismiss = A2 で実装済 (= PointerPress pre-intercept、 wave 3b/3c
+//   defer から framework method point_outside_visible_overlays land 後に配線)
 // - Tab trap は本 wave scope 外 (= 確定方針通り defer)
 // - id() は inner.id() delegate (= PRESIDENT distinction、 inner stable のため
 //   alloc_widget_id PR 不要、 worker3 DetailContainerWidget case と分離)
@@ -176,8 +177,8 @@ impl ReactiveOverlayContainer {
     /// Escape key pre-intercept から呼び出され、 全 binding が hidden の場合は
     /// 何もせず false を返す (= Escape を吸わない = base layer に届ける)。
     ///
-    /// 別 method 抽出理由: event() が key pre-intercept から呼び出す共通 dismiss
-    /// logic の再利用単位 (= Escape handler と将来の外クリック handler 等が共有)。
+    /// 別 method 抽出理由: event() が key / pointer pre-intercept から呼び出す
+    /// 共通 dismiss logic の再利用単位 (= Escape handler と A2 外クリック handler が共有)。
     /// 加えて last-visible priority / fallback / no-op といった fine-grained logic
     /// を直接 assert する unit test boundary としても機能する。
     ///
@@ -264,6 +265,26 @@ impl Widget for ReactiveOverlayContainer {
             }
             if (ks == xkbcommon::xkb::Keysym::Return || ks == xkbcommon::xkb::Keysym::KP_Enter)
                 && self.accept_topmost_visible()
+            {
+                return EventResponse::Handled;
+            }
+        }
+        // Pointer pre-intercept (= 外クリック dismiss、 A2)。
+        // visible overlay がある状態で press 座標が全 visible overlay の外
+        // (= dimmed backdrop) なら最上位 overlay を dismiss する。
+        // 座標 (x, y) は WidgetEvent の widget-local。 ReactiveOverlayContainer は
+        // SplitView を base に wrap した root 近傍 widget で translate を挟まない
+        // ため container-local = inner OverlayContainer の overlay rect と同 space
+        // (= point_outside_visible_overlays の前提座標系、
+        // feedback_coord_system_platform_layer_invariant 整合)。
+        // has_visible_overlay() で gate してから判定 (= overlay 皆無時は
+        // point_outside_* が trivial true を返すため、 gate なしだと backdrop なし
+        // でも press を吸ってしまう)。 button は問わない (= 左右中いずれの press でも
+        // backdrop なら dismiss、 modal の慣例)。
+        if let WidgetEvent::PointerPress { x, y, .. } = event {
+            if self.inner.has_visible_overlay()
+                && self.inner.point_outside_visible_overlays(*x, *y)
+                && self.dismiss_topmost_visible()
             {
                 return EventResponse::Handled;
             }
@@ -369,6 +390,17 @@ mod tests {
         })
     }
 
+    /// Synthesize a left-button `WidgetEvent::PointerPress` at container-local
+    /// (x, y) (= A2 外クリック dismiss の event() pre-intercept を駆動)。
+    fn pointer_press(x: f32, y: f32) -> WidgetEvent {
+        WidgetEvent::PointerPress {
+            x,
+            y,
+            button: 0x110, // left
+            modifiers: Modifiers::default(),
+        }
+    }
+
     /// Minimal stub widget for ReactiveOverlayContainer/LabelRef driver tests。
     /// production widget tree には登場しない (= `#[cfg(test)]` 配下のみ)。
     struct TestStub {
@@ -381,6 +413,15 @@ mod tests {
             Self {
                 id: WidgetId(raw_id),
                 size: Size::new(100.0, 50.0),
+            }
+        }
+
+        /// 任意 size の stub (= 外クリック hit-test test で base > overlay の
+        /// サイズ差を作り、 内側/外側を区別可能にするため)。
+        fn with_size(raw_id: u64, w: f32, h: f32) -> Self {
+            Self {
+                id: WidgetId(raw_id),
+                size: Size::new(w, h),
             }
         }
     }
@@ -764,6 +805,94 @@ mod tests {
         assert!(
             *state.accent_picker_visible.get(),
             "無関係 key では accent は dismiss されず visible のまま"
+        );
+    }
+
+    // ── PointerPress 外クリック dismiss end-to-end tests (= A2 Step 2) ──
+    //
+    // 座標系実証: ReactiveOverlayContainer.event() に渡る PointerPress(x, y) を
+    // container-local 座標として inner.point_outside_visible_overlays に通し、
+    // 既知 click 位置で内側/外側判定が正しく dismiss に結びつくことを確認する。
+    // base 800×600 + Center overlay 100×50 → overlay rect = (350,275,100,50)。
+    // (x,y) が container-local でなければこの内側/外側判定は破綻するため、 本
+    // test 群が座標系整合の unit-level 実証となる (= 実機 click の visual smoke は
+    // 別途、 但し座標が parent-translated なら本 test が落ちて検出できる)。
+
+    /// base 800×600 + Center overlay 100×50 (= rect (350,275,100,50)) を visible
+    /// 状態で layout 済にした container を返す helper。
+    fn laid_out_single_centered_overlay(visible: State<bool>) -> ReactiveOverlayContainer {
+        let mut roc = ReactiveOverlayContainer::new(Box::new(TestStub::with_size(1, 800.0, 600.0)));
+        roc.add_overlay_with_state(
+            "dlg",
+            Box::new(TestStub::with_size(2, 100.0, 50.0)),
+            OverlayPosition::Center,
+            visible,
+        );
+        // layout で last_size=800×600 + overlay cached_size=100×50 を確定
+        // (= overlay_rect 計算の前提)。
+        let _ = roc.layout(&Constraints::tight(800.0, 600.0));
+        roc
+    }
+
+    /// PointerPress が overlay 外 (= dimmed backdrop) なら dismiss + Handled。
+    #[test]
+    fn event_pointer_press_outside_visible_overlay_dismisses() {
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        let mut roc = laid_out_single_centered_overlay(state.accent_picker_visible.clone());
+
+        // (10, 10) は rect (350,275,100,50) の外 = backdrop
+        let resp = roc.event(&pointer_press(10.0, 10.0));
+        assert_eq!(
+            resp,
+            EventResponse::Handled,
+            "backdrop click は event() で Handled"
+        );
+        assert!(
+            !*state.accent_picker_visible.get(),
+            "backdrop click が overlay を dismiss した"
+        );
+    }
+
+    /// PointerPress が overlay 内側なら dismiss しない (= modal 内の操作)。
+    #[test]
+    fn event_pointer_press_inside_visible_overlay_does_not_dismiss() {
+        let state = for_testing();
+        state.accent_picker_visible.set(true);
+        let mut roc = laid_out_single_centered_overlay(state.accent_picker_visible.clone());
+
+        // (400, 300) は rect (350,275,100,50) の内側。
+        // 内側 click は外クリック pre-intercept を発火させず dismiss しない。
+        // (EventResponse は inner OverlayContainer の modal routing が内側 click を
+        // 消費して Handled を返しうる = 背後 base への透過を block する正しい modal
+        // 挙動。 ここで検証すべき不変は「dismiss されないこと」= state 維持。)
+        let _resp = roc.event(&pointer_press(400.0, 300.0));
+        assert!(
+            *state.accent_picker_visible.get(),
+            "overlay 内側 click では dismiss されず visible のまま"
+        );
+    }
+
+    /// visible overlay 皆無時は PointerPress を pre-intercept しない (= gate)。
+    /// point_outside_* は overlay 皆無時 trivial true を返すため、 gate なしだと
+    /// backdrop が存在しないのに press を吸ってしまう。 has_visible_overlay() gate
+    /// がそれを防ぐことを確認。
+    #[test]
+    fn event_pointer_press_when_no_overlay_visible_passes_through() {
+        let state = for_testing();
+        // overlay を add するが visible にしない
+        let mut roc = laid_out_single_centered_overlay(state.accent_picker_visible.clone());
+        assert!(!roc.inner.has_visible_overlay(), "baseline: visible 皆無");
+
+        let resp = roc.event(&pointer_press(10.0, 10.0));
+        assert_ne!(
+            resp,
+            EventResponse::Handled,
+            "visible overlay 皆無時の PointerPress は pre-intercept で吸われない"
+        );
+        assert!(
+            !*state.accent_picker_visible.get(),
+            "state 不変 (= 元から hidden)"
         );
     }
 
