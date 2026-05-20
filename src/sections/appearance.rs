@@ -7,44 +7,49 @@
 //! - Theme subsection (LabelWidget = Phase 3 で実装予定 note)
 //!
 //! ## R11 mitigation (= WCAG simple)
-//! 完全 WCAG 2.2 spec は scope outside。本 file では simple relative
-//! luminance ([`relative_luminance`]) + contrast ratio ([`contrast_ratio`]) の
-//! helper のみ、 default accent (`#5A8BA8` 風藍) vs default surface (`#FFFFFF`)
-//! の contrast を **静的に** 表示。dynamic 再計算 (= 入力反映 → 表示更新) は
-//! reactive observer / shared widget handle 設計の別 dispatch dep、 本 wave で
-//! 永続化 wire を land、 表示側更新は後続で対応。
+//! 完全 WCAG 2.2 spec は scope outside。WCAG helper は [`crate::modals::wcag`]
+//! ([`compute_wcag_status`] / [`parse_hex_or_default`]) を再利用 (= wave 3c
+//! track2 で sections / modals 間の WCAG helper 重複を解消、 BT.601 luminance
+//! 近似 + AA threshold 4.5:1 判定)。
 //!
 //! ## wave 3b — persistence wire (complete)
 //! - Slider (`on_change`) と Color mode ComboBox (`on_select`) は前置き commit で
 //!   `state.config` 更新 + debouncer 発火を配線済 ([`apply_font_scale_change`] /
 //!   [`apply_color_mode_selection`])。
-//! - TextInput accent_hex は本 commit で [`TextInputWidget::on_change`]
+//! - TextInput accent_hex は [`TextInputWidget::on_change`]
 //!   (GUI_kit PR #155 framework gap 解消で利用解禁) push-style reactive bind で
-//!   配線完了 ([`apply_accent_hex_change`])。`Rc<RefCell<TextInputWidget>>` wrap や
-//!   `take_changed` 外部 poll は不要、`Box<dyn Widget>` move-by-value のまま
-//!   builder chain 内で closure capture で state を共有する。初期値の
-//!   `set_text(&initial_accent)` 呼出は TextArea parity (PR #155) により
-//!   on_change を fire しないため、起動時の余計な debouncer.request() は
-//!   発生しない。
+//!   配線完了 ([`apply_accent_hex_change`])。
+//!
+//! ## wave 3c track2 — accent color 完成 (trigger + dynamic WCAG)
+//! - **trigger**: accent color row に `Pick...` button を追加、 on_click で
+//!   `state.accent_picker_visible.set(true)` ([`open_accent_picker`])。 これで
+//!   従来 dormant だった accent picker modal (main.rs `ReactiveOverlayContainer`
+//!   配下) が起動可能に。
+//! - **dynamic WCAG**: WCAG label を [`crate::modals::LabelRef`] 経由 shared
+//!   mutate handle で構築、 TextInput `on_change` ごとに [`compute_wcag_status`]
+//!   で再計算して label 更新 ([`refresh_wcag_label`])。 従来 static (= default
+//!   風藍固定) だった表示が入力 hex に追従。
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use hayate_kit::widget::button::ButtonWidget;
 use hayate_kit::widget::combo_box::ComboBoxWidget;
 use hayate_kit::widget::form_layout::FormLayout;
 use hayate_kit::widget::label::LabelWidget;
-use hayate_kit::widget::layout::VStack;
+use hayate_kit::widget::layout::{HStack, VStack};
 use hayate_kit::widget::slider::SliderWidget;
 use hayate_kit::widget::text_input_widget::TextInputWidget;
 use hayate_kit::Widget;
 
 use crate::lang::Strings;
+use crate::modals::wcag::{compute_wcag_status, parse_hex_or_default};
+use crate::modals::LabelRef;
 use crate::persistence::ColorMode;
 use crate::state::AppStateHandles;
 
 /// HAYATE Original default accent (= `#5A8BA8` 風藍、 RFC v0.2 §3 design language)。
 const DEFAULT_ACCENT_HEX: &str = "#5A8BA8";
-/// HAYATE Original default surface-raised (= `#FFFFFF`)。
-const DEFAULT_SURFACE_RGB: (u8, u8, u8) = (255, 255, 255);
-/// HAYATE Original default accent-base RGB (= `#5A8BA8`)。
-const DEFAULT_ACCENT_RGB: (u8, u8, u8) = (90, 139, 168);
 
 // ── Color mode ComboBox labels (= source of truth、 callback + test 共有) ──
 
@@ -74,48 +79,46 @@ pub fn build(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widg
         move |selected| apply_color_mode_selection(&s, selected)
     });
 
-    // ── Accent color hex ───────────────────────────────────────────────
-    // 初期値を state.config からロード、入力反映は PR #155 framework gap fix で
-    // 利用可能になった TextInputWidget::on_change push-style reactive bind で
-    // 配線 (= apply_accent_hex_change → state.config.update + debouncer.request)。
-    // 初期 set_text は TextArea parity で on_change を fire しないため、
-    // 起動時に余計な save request が走らない。
+    // ── WCAG label (= dynamic、 LabelRef shared mutate handle 経由) ───────
+    // 初期 content は state.config の現 accent_hex base、 TextInput on_change で
+    // refresh_wcag_label が再計算して set_text。 widget は VStack 投入、 handle は
+    // on_change closure が capture (= modals::accent と同 LabelRef pattern)。
     let initial_accent = state.config.get().appearance.accent_hex.clone();
+    let (ir, ig, ib) = parse_hex_or_default(&initial_accent);
+    let wcag_label = LabelWidget::new(compute_wcag_status(&initial_accent, ir, ig, ib), 12.0);
+    let (wcag_widget, wcag_handle) = LabelRef::new_pair(wcag_label);
+
+    // ── Accent color hex + Pick... trigger ──────────────────────────────
+    // TextInput on_change: (1) apply_accent_hex_change で config 更新 + debouncer、
+    // (2) refresh_wcag_label で WCAG label を dynamic 再計算。
+    // Pick... button: accent picker modal を起動 (= 従来 dormant の trigger)。
     let mut accent_input = TextInputWidget::new()
         .with_placeholder(DEFAULT_ACCENT_HEX)
         .with_width(160.0)
         .on_change({
             let state = state.clone();
-            move |text| apply_accent_hex_change(&state, text)
+            let wcag_handle = Rc::clone(&wcag_handle);
+            move |text| {
+                apply_accent_hex_change(&state, text);
+                refresh_wcag_label(&wcag_handle, text);
+            }
         });
     if !initial_accent.is_empty() {
         accent_input.set_text(&initial_accent);
     }
 
+    let pick_btn = ButtonWidget::new("Pick...").on_click({
+        let s = state.clone();
+        move || open_accent_picker(&s)
+    });
+    let mut accent_row = HStack::new(8.0);
+    accent_row = accent_row.add(Box::new(accent_input));
+    accent_row = accent_row.add(Box::new(pick_btn));
+
     let form = FormLayout::new()
         .row("Font size scale", font_scale)
         .row("Color mode", color_mode)
-        .row("Accent color (hex)", accent_input);
-
-    // WCAG simple contrast warning (= R11 mitigation 静的版)。
-    // default accent 風藍 vs default surface 白 の contrast を計算して表示。
-    // accent_hex 永続化 wire は完了済、 表示の dynamic 更新は reactive observer /
-    // shared widget handle 設計の別 dispatch dep。
-    let (r, g, b) = DEFAULT_ACCENT_RGB;
-    let (sr, sg, sb) = DEFAULT_SURFACE_RGB;
-    let ratio = contrast_ratio(relative_luminance(r, g, b), relative_luminance(sr, sg, sb));
-    let aa_pass = ratio >= 4.5;
-    let wcag_note = format!(
-        "WCAG AA (>=4.5:1): {} vs surface = {} -- {} [reactive validation: dynamic re-calc 別 dispatch dep]",
-        DEFAULT_ACCENT_HEX,
-        format_ratio(ratio),
-        if aa_pass {
-            "PASS"
-        } else {
-            "FAIL: pick a darker / lighter accent"
-        },
-    );
-    let wcag_label = LabelWidget::new(wcag_note, 12.0);
+        .row("Accent color (hex)", accent_row);
 
     // Theme サブセクション = Phase 3 hero feature defer の note。
     let theme_subheading = LabelWidget::new(strings.section_appearance_theme, 16.0);
@@ -127,7 +130,7 @@ pub fn build(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widg
     let mut stack = VStack::new(16.0);
     stack = stack.add(Box::new(heading));
     stack = stack.add(Box::new(form));
-    stack = stack.add(Box::new(wcag_label));
+    stack = stack.add(wcag_widget);
     stack = stack.add(Box::new(theme_subheading));
     stack = stack.add(Box::new(theme_defer_note));
     Box::new(stack)
@@ -183,37 +186,36 @@ fn parse_color_mode(label: &str) -> Option<ColorMode> {
     }
 }
 
-/// WCAG 2.2 §1.4.3 relative luminance (simple sRGB linearization)。
-///
-/// 完全 spec の gamma piecewise (= threshold 0.03928) は scope outside、本
-/// helper は `(r * 0.299 + g * 0.587 + b * 0.114) / 255.0` の伝統的 luminance
-/// 近似 ([ITU-R BT.601] coefficient)。reactive UI への組込前の sanity check
-/// 用途のみで使用、 wave 3c で完全 WCAG 2.2 関数へ差替予定。
-///
-/// [ITU-R BT.601]: https://en.wikipedia.org/wiki/Relative_luminance
-fn relative_luminance(r: u8, g: u8, b: u8) -> f32 {
-    let rf = r as f32;
-    let gf = g as f32;
-    let bf = b as f32;
-    (rf * 0.299 + gf * 0.587 + bf * 0.114) / 255.0
+/// `Pick...` button on_click action: accent picker modal を起動する
+/// (= `state.accent_picker_visible.set(true)`)。 main.rs `ReactiveOverlayContainer`
+/// の binding が次 frame sync で overlay を show する。 従来 trigger 皆無で
+/// dormant だった modal をユーザー操作で起動可能にする wave 3c の核。
+fn open_accent_picker(state: &AppStateHandles) {
+    state.accent_picker_visible.set(true);
 }
 
-/// WCAG 2.2 §1.4.3 contrast ratio approximation (= `(L1 + 0.05) / (L2 + 0.05)`、
-/// L1 >= L2)。
-fn contrast_ratio(la: f32, lb: f32) -> f32 {
-    let (l1, l2) = if la >= lb { (la, lb) } else { (lb, la) };
-    (l1 + 0.05) / (l2 + 0.05)
-}
-
-/// `4.7321 -> "4.73:1"` 等。 contrast ratio 表示用。
-fn format_ratio(r: f32) -> String {
-    format!("{:.2}:1", r)
+/// WCAG label を現入力 hex で再計算して set_text (= TextInput on_change ごとに
+/// 呼ばれる dynamic 更新)。 [`crate::modals::wcag`] の helper を再利用して
+/// 重複を排し、 inline accent row と modal で同一 WCAG 評価ロジックを共有する。
+fn refresh_wcag_label(wcag_handle: &Rc<RefCell<LabelWidget>>, hex: &str) {
+    let (r, g, b) = parse_hex_or_default(hex);
+    wcag_handle
+        .borrow_mut()
+        .set_text(&compute_wcag_status(hex, r, g, b));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lang::Lang;
+    // wave 3c dedup: WCAG 低レベル helper は modals::wcag を canonical 化。
+    // 既存 appearance WCAG-math test は同 helper を参照する形で維持。
+    use crate::modals::wcag::{contrast_ratio, relative_luminance};
+
+    /// HAYATE Original default accent-base RGB (= `#5A8BA8`、 test fixation 用)。
+    const DEFAULT_ACCENT_RGB: (u8, u8, u8) = (90, 139, 168);
+    /// HAYATE Original default surface-raised RGB (= `#FFFFFF`、 test fixation 用)。
+    const DEFAULT_SURFACE_RGB: (u8, u8, u8) = (255, 255, 255);
 
     #[test]
     fn build_returns_non_panicking_tree_for_both_languages() {
@@ -253,6 +255,68 @@ mod tests {
             contrast_ratio(relative_luminance(r, g, b), relative_luminance(sr, sg, sb));
         assert!(ratio.is_finite());
         assert!(ratio > 1.0);
+    }
+
+    // ── wave 3c track2: trigger + dynamic WCAG ─────────────────────────
+
+    /// Pick... button action = accent picker modal trigger。
+    /// open_accent_picker で accent_picker_visible が false → true に遷移。
+    #[test]
+    fn open_accent_picker_sets_visible_true() {
+        let state = crate::state::for_testing();
+        assert!(!*state.accent_picker_visible.get(), "initial = false (dormant)");
+        open_accent_picker(&state);
+        assert!(
+            *state.accent_picker_visible.get(),
+            "Pick... trigger で modal visible = true"
+        );
+    }
+
+    /// open_accent_picker は config / debouncer を一切 touch しない
+    /// (= 純粋に modal 起動のみ、 hex 反映は modal 内 Apply path の責務)。
+    #[test]
+    fn open_accent_picker_does_not_touch_config_or_debouncer() {
+        let state = crate::state::for_testing();
+        let snapshot = state.config.get().clone();
+        open_accent_picker(&state);
+        assert_eq!(*state.config.get(), snapshot, "config 不変");
+        assert!(!state.debouncer.borrow().has_pending(), "save request なし");
+    }
+
+    /// dynamic WCAG: refresh_wcag_label が入力 hex で label text を再計算更新。
+    /// 黒 (#000000) vs 白 surface = 21:1 PASS、 風藍 (#5A8BA8) = ~3.6 FAIL。
+    #[test]
+    fn refresh_wcag_label_updates_text_for_input_hex() {
+        let label = LabelWidget::new("initial", 12.0);
+        let (_widget, handle) = LabelRef::new_pair(label);
+
+        refresh_wcag_label(&handle, "#000000");
+        assert!(
+            handle.borrow().text.contains("PASS"),
+            "黒 vs 白 surface = 21:1 → AA PASS"
+        );
+        assert!(handle.borrow().text.contains("#000000"), "入力 hex を echo");
+
+        refresh_wcag_label(&handle, DEFAULT_ACCENT_HEX);
+        assert!(
+            handle.borrow().text.contains("FAIL"),
+            "風藍 vs 白 surface = ~3.6:1 → AA FAIL"
+        );
+    }
+
+    /// dynamic WCAG: invalid hex 入力でも panic せず fallback 表示。
+    #[test]
+    fn refresh_wcag_label_handles_invalid_hex_gracefully() {
+        let label = LabelWidget::new("initial", 12.0);
+        let (_widget, handle) = LabelRef::new_pair(label);
+        refresh_wcag_label(&handle, "garbage");
+        // parse_hex_or_default が風藍 fallback → FAIL、 raw 入力を echo
+        let text = handle.borrow().text.clone();
+        assert!(text.contains("garbage"), "raw 入力 echo (= user feedback)");
+        assert!(
+            text.contains("fallback") || text.contains("FAIL"),
+            "invalid 時 fallback 表示 or FAIL 判定"
+        );
     }
 
     // ── wave 3b callback wires ─────────────────────────────────────────
