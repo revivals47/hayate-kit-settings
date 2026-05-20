@@ -34,13 +34,19 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use hayate_kit::prelude::*;
-// AppTheme type は prelude の nested module 内 re-export で glob 非到達のため
-// crate root から明示 import (= app_theme_for の戻り型)。
-use hayate_kit::AppTheme;
+// AppTheme / Theme type は prelude の nested module 内 re-export で glob 非到達の
+// ため crate root から明示 import (= app_theme_for / theme_for の戻り型)。
+use hayate_kit::{AppTheme, Theme};
 // 6 skin AppTheme preset。 app_theme_hayate_original は prelude 経由 reach 済、
 // 残 5 件は full path で明示 import (= Phase 3a theme switcher の app_theme_for mapping)。
 use hayate_kit::style::widget_theme_presets::app::{
     app_theme_mac_os9, app_theme_macos_big_sur, app_theme_win10, app_theme_win95, app_theme_xp_luna,
+};
+// 6 skin の base palette 定数 (= theme_for mapping、 ACTIVE_THEME に入る半分)。
+// HAYATE_ORIGINAL は prelude 経由 reach 済、 残 5 件は AppTheme preset と同じ
+// L2 style module から full path で明示 import。
+use hayate_kit::style::theme::{
+    MACOS9_THEME, MACOS_BIG_SUR_THEME, WIN10_THEME, WIN95_THEME, XP_LUNA_THEME,
 };
 
 use crate::lang::Strings;
@@ -79,6 +85,35 @@ pub fn app_theme_for(id: ThemeId) -> AppTheme {
     }
 }
 
+/// Map a [`ThemeId`] to its GUI_kit base [`Theme`] palette — the half that
+/// installs into `ACTIVE_THEME` and is read by `active_theme()` widgets (and
+/// the frame background). The per-skin twin of [`app_theme_for`];
+/// [`theme_bundle_for`] pairs the two so a runtime swap moves the palette AND
+/// the per-widget aggregate together. `match` is exhaustive (no `_` arm) so a
+/// future [`ThemeId`] variant surfaces here as a compile error.
+pub fn theme_for(id: ThemeId) -> &'static Theme {
+    match id {
+        ThemeId::HayateOriginal => &HAYATE_ORIGINAL,
+        ThemeId::Win95 => &WIN95_THEME,
+        ThemeId::XpLuna => &XP_LUNA_THEME,
+        ThemeId::Win10 => &WIN10_THEME,
+        ThemeId::MacOs9 => &MACOS9_THEME,
+        ThemeId::MacOsBigSur => &MACOS_BIG_SUR_THEME,
+    }
+}
+
+/// Pair a [`ThemeId`]'s base palette ([`theme_for`]) and per-widget aggregate
+/// ([`app_theme_for`]) into a [`ThemeBundle`] for a full runtime theme swap
+/// (`AppThemeHandle::set_bundle`). Carrying both halves is what makes a skin
+/// switch re-colour `active_theme()` widgets + the frame background, not just
+/// the injected `AppTheme` — the gap the deprecated `AppThemeHandle::set` left.
+pub fn theme_bundle_for(id: ThemeId) -> ThemeBundle {
+    ThemeBundle {
+        theme: theme_for(id).clone(),
+        app_theme: Rc::new(app_theme_for(id)),
+    }
+}
+
 /// Theme ComboBox の選択肢 (= `(ThemeId, 表示 label)` の単一 source of truth)。
 /// 表示順 = HayateOriginal (signature) を先頭、 以降 retro/vendor。 label ⇔
 /// ThemeId 双方向 map ([`theme_label_for`] / [`theme_id_from_label`]) の元。
@@ -110,15 +145,19 @@ fn theme_id_from_label(label: &str) -> Option<ThemeId> {
 }
 
 /// Theme ComboBox の `on_select` を反映: (1) theme_handle 経由 runtime swap
-/// (= `handle.set(app_theme_for(id))`、 production のみ Some)、 (2) config.theme_id
-/// 更新 + debouncer 発火 (= persist)。
+/// (= `handle.set_bundle(theme_bundle_for(id))`、 production のみ Some)、
+/// (2) config.theme_id 更新 + debouncer 発火 (= persist)。
+///
+/// `set_bundle` は base palette (`ACTIVE_THEME`) + per-widget `AppTheme` の
+/// 両 half を 1 transaction で運ぶ (= 旧 `set()` は AppTheme のみ運び palette
+/// 据置 = skin 切替で背景/`active_theme()` widget が変わらなかった gap の root-fix)。
 ///
 /// handle が `None` (= test 構築) の場合は runtime swap を skip し config/debouncer
-/// のみ更新 (= handle.set は GUI runtime 経路で元々 unit test observe 不可、
+/// のみ更新 (= set_bundle は GUI runtime 経路で元々 unit test observe 不可、
 /// persist 側のみ assert する設計)。
 fn apply_theme_selection(state: &AppStateHandles, id: ThemeId) {
     if let Some(handle) = state.theme_handle.as_ref() {
-        handle.set(app_theme_for(id));
+        handle.set_bundle(theme_bundle_for(id));
     }
     state.config.update(|c| c.appearance.theme_id = id);
     state.debouncer.borrow().request();
@@ -357,6 +396,43 @@ mod tests {
             hayate.button.bg, win95.button.bg,
             "HayateOriginal と Win95 は異なる button bg (= 同一 preset 返却バグ検出)"
         );
+    }
+
+    /// theme_for は skin ごとに異なる base palette を返す (= 同一 palette 返却 /
+    /// 取り違えバグ検出)。base palette は ACTIVE_THEME に入り背景/active_theme()
+    /// widget の色を決めるので、 swap で実際に変わることが Step 2 の核。
+    #[test]
+    fn theme_for_maps_distinct_palettes() {
+        assert_ne!(
+            theme_for(ThemeId::Win95).bg_primary,
+            theme_for(ThemeId::Win10).bg_primary,
+            "Win95 と Win10 は異なる base palette bg_primary"
+        );
+        assert_ne!(
+            theme_for(ThemeId::HayateOriginal).bg_primary,
+            theme_for(ThemeId::MacOs9).bg_primary,
+            "HayateOriginal と MacOs9 は異なる base palette bg_primary"
+        );
+    }
+
+    /// theme_bundle_for は base palette ([`theme_for`]) と per-widget AppTheme
+    /// ([`app_theme_for`]) を pair にする (= set_bundle が両 half を一緒に運ぶ
+    /// Step 2 の核、 旧 set() の palette 据置 gap の root-fix)。
+    #[test]
+    fn theme_bundle_for_pairs_palette_and_app_theme() {
+        for id in [ThemeId::Win95, ThemeId::MacOsBigSur] {
+            let bundle = theme_bundle_for(id);
+            assert_eq!(
+                bundle.theme.bg_primary,
+                theme_for(id).bg_primary,
+                "bundle.theme = theme_for(id) の base palette"
+            );
+            assert_eq!(
+                bundle.app_theme.button.bg,
+                app_theme_for(id).button.bg,
+                "bundle.app_theme = app_theme_for(id) の AppTheme"
+            );
+        }
     }
 
     /// label ⇔ ThemeId 双方向 map が全 6 variant で round-trip する。
