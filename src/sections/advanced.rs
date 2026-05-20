@@ -17,13 +17,7 @@
 //!   bind が wave 3c 以降の dispatch、本 wave では `apply_reset_all_request`
 //!   と同 confirm-modal トリガーに合流させる (= destructive 直接実行は禁止)。
 
-use hayate_kit::widget::button::ButtonWidget;
-use hayate_kit::widget::combo_box::ComboBoxWidget;
-use hayate_kit::widget::form_layout::FormLayout;
-use hayate_kit::widget::label::LabelWidget;
-use hayate_kit::widget::layout::{HStack, VStack};
-use hayate_kit::widget::switch::SwitchWidget;
-use hayate_kit::Widget;
+use hayate_kit::prelude::*;
 
 use crate::lang::Strings;
 use crate::persistence::LogLevel;

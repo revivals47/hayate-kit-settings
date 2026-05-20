@@ -22,8 +22,7 @@
 //! DTP app preference dialog (= 大量 settings 横断検索) でも reuse 想定、
 //! Search bar pattern + linear `filter_*` fn signature は universal。
 
-use hayate_kit::widget::text_input_widget::TextInputWidget;
-use hayate_kit::Widget;
+use hayate_kit::prelude::*;
 
 use crate::lang::{Lang, Strings};
 use crate::sections::SectionId;

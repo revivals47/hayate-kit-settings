@@ -9,12 +9,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use hayate_kit::widget::label::LabelWidget;
-use hayate_kit::widget::overlay::{OverlayContainer, OverlayPosition};
-use hayate_kit::{
-    Constraints, EventResponse, ItemRect, Renderer, Size, State, TextEngine, Widget, WidgetEvent,
-    WidgetId,
-};
+use hayate_kit::prelude::widget_impl::*;
 
 // ── ReactiveOverlayContainer (= wave 3b 視覚層 root): State<bool> 観測 → ──
 // hayate_kit::widget::overlay::OverlayContainer の show/hide_overlay forward。
@@ -369,7 +364,6 @@ impl Widget for LabelRef {
 mod tests {
     use super::*;
     use crate::state::for_testing;
-    use hayate_kit::{KeyEvent, KeyState, Modifiers};
 
     /// Synthesize a `WidgetEvent::Key` for the given keysym (= Pressed, no mods)。
     ///

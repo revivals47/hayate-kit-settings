@@ -6,11 +6,7 @@
 
 use std::rc::Rc;
 
-use hayate_kit::widget::button::ButtonWidget;
-use hayate_kit::widget::label::LabelWidget;
-use hayate_kit::widget::layout::{HStack, VStack};
-use hayate_kit::widget::text_input_widget::TextInputWidget;
-use hayate_kit::Widget;
+use hayate_kit::prelude::*;
 
 use crate::lang::Strings;
 use crate::state::AppStateHandles;

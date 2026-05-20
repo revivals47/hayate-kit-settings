@@ -13,12 +13,7 @@
 //! helper fn 抽出により unit test で 1:1 に exercise する設計
 //! (= wave 3 reactive bind 配線時の挙動を closure 越しではなく helper 経由で検証)。
 
-use hayate_kit::widget::combo_box::ComboBoxWidget;
-use hayate_kit::widget::form_layout::FormLayout;
-use hayate_kit::widget::label::LabelWidget;
-use hayate_kit::widget::layout::VStack;
-use hayate_kit::widget::switch::SwitchWidget;
-use hayate_kit::Widget;
+use hayate_kit::prelude::*;
 
 use crate::lang::Strings;
 use crate::persistence::LangConfig;
