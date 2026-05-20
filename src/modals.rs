@@ -43,6 +43,14 @@ const DEFAULT_SURFACE_RGB: (u8, u8, u8) = (255, 255, 255);
 
 pub(crate) use overlay::ReactiveOverlayContainer;
 
+// `LabelRef` は split 前 `crate::modals::LabelRef` で reach 可能だった
+// pub(crate) struct。 `mod overlay` が private のため split で path が消失する
+// (= pure refactor の surface 保全に technically 反する)。 現状 crate 内で
+// `crate::modals::LabelRef` を参照する caller は無いが、 split 前 surface を
+// 完全保全するため re-export を維持 (= cancel_* と同 premature 除去回避方針)。
+#[allow(unused_imports)]
+pub(crate) use overlay::LabelRef;
+
 pub use accent::build_accent_picker;
 pub(crate) use accent::apply_accent_picker;
 
