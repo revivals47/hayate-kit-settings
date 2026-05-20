@@ -27,7 +27,7 @@ use hayate_kit::Widget;
 
 use crate::lang::Strings;
 use crate::persistence::LogLevel;
-use crate::state::AppStateHandles;
+use crate::state::{AppStateHandles, ResetKind};
 
 // ── ComboBox label literal (= source of truth、 callback と test で共有) ──
 
@@ -60,26 +60,27 @@ pub fn build(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widg
         move |selected| apply_log_level_selection(&s, selected)
     });
 
-    // Field 3: Cache clear button — wave 3b では destructive 直接実行を回避
-    // して reset confirm modal を再利用、 actual cache flush wire は後段。
+    // Field 3: Cache clear button — 粒度別 confirm の CacheClear variant を起動
+    // (= 実 cache layer 不在で apply は no-op、 confirm 文言で no-op を明示)。
     let cache_clear = ButtonWidget::new("Clear cache").on_click({
         let s = state.clone();
-        move || apply_reset_all_request(&s)
+        move || request_reset(&s, ResetKind::CacheClear)
     });
 
-    // Field 4: Reset to defaults — 3 button 全部が一旦 confirm modal に合流
-    // (= destructive action は user 確認越し)。粒度別 reset の wire は wave 3c。
+    // Field 4: Reset to defaults — 3 button が個別の粒度で confirm modal を起動
+    // (= destructive action は user 確認越し、 wave 3c で粒度別に分離)。
     let reset_all = ButtonWidget::new("Reset all").on_click({
         let s = state.clone();
-        move || apply_reset_all_request(&s)
+        move || request_reset(&s, ResetKind::All)
     });
     let reset_section = ButtonWidget::new("Reset section").on_click({
         let s = state.clone();
-        move || apply_reset_all_request(&s)
+        // 現在表示中の section を snapshot (= modal blocking 中は selection 不変)。
+        move || request_reset(&s, ResetKind::Section(*s.selected_section.get()))
     });
     let reset_field = ButtonWidget::new("Reset field").on_click({
         let s = state.clone();
-        move || apply_reset_all_request(&s)
+        move || request_reset(&s, ResetKind::Field)
     });
     let reset_row = HStack::new(8.0)
         .add(Box::new(reset_all))
@@ -120,10 +121,14 @@ fn apply_log_level_selection(state: &AppStateHandles, selected: &str) {
     state.debouncer.borrow().request();
 }
 
-/// "Reset all" / "Reset section" / "Reset field" / "Clear cache" の click は
-/// すべて confirm modal を起こす形に合流させる (= wave 3b、 粒度別 wire は
-/// wave 3c 以降)。 destructive 直接実行は禁止、 必ず user 確認 gate を通す。
-fn apply_reset_all_request(state: &AppStateHandles) {
+/// Reset 系 button の click を粒度別に confirm modal へ流す (= wave 3c)。
+///
+/// `pending_reset` に `kind` を set + `reset_confirm_visible.set(true)` の 2 操作
+/// のみ。 destructive 直接実行は禁止、 必ず user 確認 gate (= reset confirm modal)
+/// を通す。 実 reset は modal の Reset 押下 / Enter accept → `apply_reset_confirm`
+/// → `apply_reset(state, kind)` 経路でのみ発火。
+fn request_reset(state: &AppStateHandles, kind: ResetKind) {
+    state.pending_reset.set(Some(kind));
     state.reset_confirm_visible.set(true);
 }
 
@@ -142,6 +147,7 @@ fn parse_log_level(label: &str) -> Option<LogLevel> {
 mod tests {
     use super::*;
     use crate::lang::Lang;
+    use crate::sections::SectionId;
 
     #[test]
     fn build_smoke_does_not_panic() {
@@ -189,17 +195,54 @@ mod tests {
     }
 
     #[test]
-    fn reset_request_opens_confirm_modal_without_mutating_config() {
+    fn request_reset_opens_confirm_modal_without_mutating_config() {
         // destructive action は user 確認 modal を経由するため、 button click
         // 単独で config を書き換えない (= reset modal commit path で初めて
-        // `persistence::reset` を呼ぶ contract)。
+        // `apply_reset` を呼ぶ contract)。
         let state = crate::state::for_testing();
         let pre = state.config.get().clone();
         assert!(!*state.reset_confirm_visible.get());
-        apply_reset_all_request(&state);
+        request_reset(&state, ResetKind::All);
         assert!(*state.reset_confirm_visible.get());
         assert_eq!(*state.config.get(), pre); // 不変
         assert!(!state.debouncer.borrow().has_pending()); // save も発火しない
+    }
+
+    #[test]
+    fn request_reset_sets_pending_kind_per_button() {
+        // 各 button が個別の ResetKind を pending_reset に set する。
+        let state = crate::state::for_testing();
+
+        request_reset(&state, ResetKind::All);
+        assert_eq!(*state.pending_reset.get(), Some(ResetKind::All));
+
+        request_reset(&state, ResetKind::Section(SectionId::Advanced));
+        assert_eq!(
+            *state.pending_reset.get(),
+            Some(ResetKind::Section(SectionId::Advanced))
+        );
+
+        request_reset(&state, ResetKind::Field);
+        assert_eq!(*state.pending_reset.get(), Some(ResetKind::Field));
+
+        request_reset(&state, ResetKind::CacheClear);
+        assert_eq!(*state.pending_reset.get(), Some(ResetKind::CacheClear));
+
+        // いずれも config は不変 (= request は確認 gate を開くのみ)
+        assert!(!state.debouncer.borrow().has_pending());
+    }
+
+    #[test]
+    fn reset_section_button_snapshots_selected_section() {
+        // Reset section は request 時の selected_section を snapshot する設計。
+        // selected_section を Appearance にしてから request → Section(Appearance)。
+        let state = crate::state::for_testing();
+        state.selected_section.set(SectionId::Appearance);
+        request_reset(&state, ResetKind::Section(*state.selected_section.get()));
+        assert_eq!(
+            *state.pending_reset.get(),
+            Some(ResetKind::Section(SectionId::Appearance))
+        );
     }
 
     #[test]

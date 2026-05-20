@@ -4,37 +4,209 @@
 //! wave 3c-pre module split で `modals.rs` から分離 (pure refactor、 behavior
 //! 変更ゼロ)。 後続 track1 (= reset) の主担当領域。
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use hayate_kit::widget::button::ButtonWidget;
 use hayate_kit::widget::label::LabelWidget;
 use hayate_kit::widget::layout::{HStack, VStack};
-use hayate_kit::Widget;
+use hayate_kit::{Constraints, ItemRect, Renderer, Size, State, TextEngine, Widget, WidgetId};
 
 use crate::lang::Strings;
 use crate::persistence;
-use crate::state::AppStateHandles;
+use crate::sections::SectionId;
+use crate::state::{AppStateHandles, ResetKind};
 
-// ── action helpers (= wave 3b core、 全 button on_click + 全 test で共有) ──
+// ── action helpers (= wave 3b core + wave 3c 粒度別、 全 button on_click + 全 test で共有) ──
 
-/// Reset Config to defaults + persist immediately + dismiss reset confirm modal。
+/// Apply a reset of the requested granularity + persist + dismiss modal。
 ///
-/// `persistence::reset` が disk side `config.json` を `.bak` rename + new default
-/// 書き出し、 同時に in-memory state.config も `Config::default()` で揃える。
+/// 粒度別 destructive reset の中核。 [`ResetKind`] で何を default に戻すか分岐:
+/// - [`ResetKind::All`]: `persistence::reset` で disk `config.json` を `.bak`
+///   rename + new default 書き出し + in-memory `Config::default()` 同期 (= 旧
+///   `apply_reset_confirm` の hard reset 動作を保全)
+/// - [`ResetKind::Section`]: 指定 section の sub-config struct のみ default に
+///   差し替え + `persistence::save` で disk 反映 (.bak は save の atomic rename で
+///   自動作成)
+/// - [`ResetKind::Field`]: accent_hex 単一 field を default に + save
+/// - [`ResetKind::CacheClear`]: 実 cache layer 不在のため no-op (= 将来 cache
+///   実装時に flush wire)
+///
+/// 末尾で `reset_confirm_visible` / `pending_reset` を clear (= modal を閉じて
+/// pending 状態を解除)。 accent_hex に触れる variant (All / Field /
+/// Section(Appearance)) では `draft_accent_hex` も config 現値に reseed
+/// (= reopen 時に旧 draft が見えない、 PR #8 codex 査読 real bug fix の踏襲)。
+///
 /// debouncer は使わず即時 disk 書き込み (= destructive 確認後の hard reset、
 /// debounce 経由で待つ semantics が不適切)。
-pub(crate) fn apply_reset_confirm(state: &AppStateHandles) -> std::io::Result<()> {
-    persistence::reset(&state.config_path)?;
-    state.config.set(persistence::Config::default());
+pub(crate) fn apply_reset(state: &AppStateHandles, kind: ResetKind) -> std::io::Result<()> {
+    match kind {
+        ResetKind::All => {
+            persistence::reset(&state.config_path)?;
+            state.config.set(persistence::Config::default());
+            state
+                .draft_accent_hex
+                .set(persistence::Config::default().appearance.accent_hex);
+        }
+        ResetKind::Section(sid) => {
+            state.config.update(|c| reset_section_in_config(c, sid));
+            persistence::save(&state.config.get(), &state.config_path)?;
+            // Appearance section reset 時のみ accent draft を reseed
+            // (= 他 section reset は accent_hex に触れない)。
+            if sid == SectionId::Appearance {
+                let current = state.config.get().appearance.accent_hex.clone();
+                state.draft_accent_hex.set(current);
+            }
+        }
+        ResetKind::Field => {
+            let default_accent = persistence::Config::default().appearance.accent_hex;
+            state
+                .config
+                .update(|c| c.appearance.accent_hex = default_accent.clone());
+            persistence::save(&state.config.get(), &state.config_path)?;
+            state.draft_accent_hex.set(default_accent);
+        }
+        ResetKind::CacheClear => {
+            // 実 cache layer 不在のため no-op (= 将来 cache 実装時に flush wire)。
+            // config / draft いずれも触れず、 modal dismiss のみ実施。
+        }
+    }
     state.reset_confirm_visible.set(false);
-    // draft_accent_hex も default に同期 (= PR #8 codex 査読 real bug fix)。
-    // reset 後の accent_picker reopen 時に旧 draft (= user 編集途中値) が見え
-    // ないように、 config と一致する default value で reseed する。
-    state.draft_accent_hex.set(persistence::Config::default().appearance.accent_hex);
+    state.pending_reset.set(None);
     Ok(())
 }
 
-/// Dismiss reset confirm modal without performing reset (= state 不変)。
+/// Reset confirm modal の Reset 押下 / Enter accept から呼ばれる entry point。
+///
+/// `pending_reset` を読んで [`apply_reset`] に dispatch する thin wrapper。
+/// signature を `(state) -> io::Result<()>` のまま維持することで、 main.rs の
+/// on_enter closure / reset button on_click は無変更で粒度別 reset に対応する
+/// (= scope discipline、 main.rs touch 不要)。 `pending_reset` が `None` の場合
+/// (= 直接 modal を開いた等の安全側経路) は `ResetKind::All` に fallback し、
+/// 従来の hard reset 動作を保全。
+pub(crate) fn apply_reset_confirm(state: &AppStateHandles) -> std::io::Result<()> {
+    let kind = (*state.pending_reset.get()).unwrap_or(ResetKind::All);
+    apply_reset(state, kind)
+}
+
+/// Dismiss reset confirm modal without performing reset (= config 不変)。
+/// `pending_reset` も `None` に戻す (= 次回 modal が stale kind を読まない)。
 pub(crate) fn cancel_reset_confirm(state: &AppStateHandles) {
     state.reset_confirm_visible.set(false);
+    state.pending_reset.set(None);
+}
+
+/// 指定 section の sub-config struct を `Default` で差し替える。
+/// `Config` の section 別 nested struct がそれぞれ `Default` を実装している
+/// 前提 (= persistence layer の schema と整合)。
+fn reset_section_in_config(config: &mut persistence::Config, sid: SectionId) {
+    use persistence::{
+        AccessibilityConfig, AdvancedConfig, AppearanceConfig, GeneralConfig, ImeConfig,
+    };
+    match sid {
+        SectionId::General => config.general = GeneralConfig::default(),
+        SectionId::Appearance => config.appearance = AppearanceConfig::default(),
+        SectionId::Accessibility => config.accessibility = AccessibilityConfig::default(),
+        SectionId::Ime => config.ime = ImeConfig::default(),
+        SectionId::Advanced => config.advanced = AdvancedConfig::default(),
+    }
+}
+
+/// `pending_reset` の値から confirm modal の表示 message を構成する (= 何が
+/// reset されるかを user に明示)。 `None` は安全側 fallback message。
+pub(crate) fn reset_confirm_message(kind: Option<ResetKind>) -> String {
+    match kind {
+        Some(ResetKind::All) => {
+            "Reset ALL settings to default? (この操作は取消不可)".to_string()
+        }
+        Some(ResetKind::Section(sid)) => format!(
+            "Reset the {} section to default? (この操作は取消不可)",
+            section_label(sid)
+        ),
+        Some(ResetKind::Field) => format!(
+            "Reset accent color to default ({})? (この操作は取消不可)",
+            persistence::Config::default().appearance.accent_hex
+        ),
+        Some(ResetKind::CacheClear) => {
+            "Clear cache? (現状 cache layer 未実装のため no-op)".to_string()
+        }
+        None => "Reset settings? (この操作は取消不可)".to_string(),
+    }
+}
+
+/// SectionId → 人間可読 section 名 (= confirm message 用)。
+fn section_label(sid: SectionId) -> &'static str {
+    match sid {
+        SectionId::General => "General",
+        SectionId::Appearance => "Appearance",
+        SectionId::Accessibility => "Accessibility",
+        SectionId::Ime => "IME",
+        SectionId::Advanced => "Advanced",
+    }
+}
+
+// ── ReactiveResetMessage (= pending_reset 観測 → 動的 confirm message) ──
+//
+// reset confirm modal は build_reset_confirm で 1 回構築され、 reset_confirm_visible
+// で show/hide される。 message は pending_reset (= どの button が押されたか) に
+// 応じて動的に変える必要があるため、 ReactiveOverlayContainer の sync pattern を
+// 踏襲し、 layout/paint 冒頭で pending_reset を観測 → 差分時のみ set_text する
+// thin reactive label wrapper。
+
+/// `pending_reset` を観測して confirm message を動的更新する LabelWidget wrapper。
+struct ReactiveResetMessage {
+    pending: State<Option<ResetKind>>,
+    inner: LabelWidget,
+    last_observed: Option<ResetKind>,
+}
+
+impl ReactiveResetMessage {
+    fn new(pending: State<Option<ResetKind>>) -> Self {
+        let initial = *pending.get();
+        let inner = LabelWidget::new(reset_confirm_message(initial), 14.0);
+        Self {
+            pending,
+            inner,
+            last_observed: initial,
+        }
+    }
+
+    /// layout / paint 冒頭で呼出、 idempotent (= 差分時のみ set_text)。
+    fn sync(&mut self) {
+        let now = *self.pending.get();
+        if now != self.last_observed {
+            self.inner.set_text(&reset_confirm_message(now));
+            self.last_observed = now;
+        }
+    }
+}
+
+impl Widget for ReactiveResetMessage {
+    fn id(&self) -> WidgetId {
+        self.inner.id()
+    }
+
+    fn layout(&mut self, constraints: &Constraints) -> Size {
+        self.sync();
+        self.inner.layout(constraints)
+    }
+
+    fn paint(&mut self, renderer: &mut Renderer, rect: ItemRect) {
+        self.sync();
+        self.inner.paint(renderer, rect);
+    }
+
+    fn dirty(&self) -> bool {
+        self.inner.dirty()
+    }
+
+    fn clear_dirty(&mut self) {
+        self.inner.clear_dirty();
+    }
+
+    fn inject_engine(&mut self, engine: Rc<RefCell<TextEngine>>) {
+        self.inner.inject_engine(engine);
+    }
 }
 
 // ── widget composition (= wave 3b 視覚 wire 完成) ──
@@ -60,11 +232,10 @@ pub(crate) fn cancel_reset_confirm(state: &AppStateHandles) {
 ///   登録、 Ok 系 button click と同等 result)。
 #[allow(dead_code)] // wave 3c 以降 main.rs から呼ばれる
 pub fn build_reset_confirm(_strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widget> {
-    let title = LabelWidget::new("Reset all settings?", 16.0);
-    let message = LabelWidget::new(
-        "全 settings を default に reset しますか? (この操作は取消不可)",
-        14.0,
-    );
+    // title は generic (= 粒度は message 側で明示)、 message は pending_reset を
+    // 観測して動的更新する ReactiveResetMessage で構成。
+    let title = LabelWidget::new("Confirm reset", 16.0);
+    let message = ReactiveResetMessage::new(state.pending_reset.clone());
 
     let cancel_state = state.clone();
     let cancel_btn = ButtonWidget::new("Cancel").on_click(move || {
@@ -89,6 +260,260 @@ pub fn build_reset_confirm(_strings: &'static Strings, state: &AppStateHandles) 
     stack = stack.add(Box::new(message));
     stack = stack.add(Box::new(buttons));
     Box::new(stack)
+}
+
+#[cfg(test)]
+mod granular_tests {
+    use super::*;
+    use crate::persistence::{Config, LogLevel};
+    use crate::state::{for_testing, AppStateHandles, ResetKind};
+    use hayate_kit::ReactiveRuntime;
+    use std::path::PathBuf;
+
+    fn isolated_state(label: &str) -> (AppStateHandles, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "hayate-kit-settings-granular-test-{}-{}",
+            std::process::id(),
+            label
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("config.json");
+        let runtime = ReactiveRuntime::new();
+        let state = AppStateHandles::new(&runtime, Config::default(), path.clone());
+        (state, path)
+    }
+
+    fn cleanup(path: &std::path::Path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    // ── confirm message 文言 (= 粒度別、 何が reset されるか明示) ──
+
+    #[test]
+    fn message_distinguishes_each_reset_kind() {
+        let all = reset_confirm_message(Some(ResetKind::All));
+        assert!(all.contains("ALL"), "all = 全体明示");
+
+        let sec = reset_confirm_message(Some(ResetKind::Section(SectionId::Advanced)));
+        assert!(sec.contains("Advanced"), "section 名明示");
+        assert!(sec.contains("section"));
+
+        let field = reset_confirm_message(Some(ResetKind::Field));
+        assert!(field.contains("accent"), "field = accent 明示");
+
+        let cache = reset_confirm_message(Some(ResetKind::CacheClear));
+        assert!(cache.contains("cache") || cache.contains("Cache"), "cache 明示");
+        assert!(cache.contains("no-op"), "未実装 no-op を明示");
+
+        // 4 message は互いに distinct
+        assert_ne!(all, sec);
+        assert_ne!(sec, field);
+        assert_ne!(field, cache);
+        assert_ne!(all, field);
+    }
+
+    #[test]
+    fn message_section_label_covers_every_section() {
+        for sid in [
+            SectionId::General,
+            SectionId::Appearance,
+            SectionId::Accessibility,
+            SectionId::Ime,
+            SectionId::Advanced,
+        ] {
+            let msg = reset_confirm_message(Some(ResetKind::Section(sid)));
+            assert!(msg.contains(section_label(sid)), "section 名が message に含まれる");
+        }
+    }
+
+    #[test]
+    fn message_none_falls_back_to_generic() {
+        let msg = reset_confirm_message(None);
+        assert!(msg.contains("Reset"), "fallback も Reset 明示");
+    }
+
+    // ── apply_reset 粒度別 action ──
+
+    #[test]
+    fn apply_reset_all_restores_full_default_and_clears_pending() {
+        let (state, path) = isolated_state("all");
+        state.config.update(|c| {
+            c.appearance.accent_hex = String::from("#FFCC00");
+            c.advanced.log_level = LogLevel::Trace;
+            c.general.startup_reset_window = true;
+        });
+        persistence::save(&state.config.get(), &path).expect("seed");
+        state.pending_reset.set(Some(ResetKind::All));
+        state.reset_confirm_visible.set(true);
+
+        apply_reset(&state, ResetKind::All).expect("reset all");
+
+        assert_eq!(*state.config.get(), Config::default(), "全 default 復元");
+        assert!(!*state.reset_confirm_visible.get(), "modal dismiss");
+        assert!(state.pending_reset.get().is_none(), "pending clear");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn apply_reset_section_resets_only_target_section() {
+        let (state, path) = isolated_state("section");
+        // 2 section を non-default に seed
+        state.config.update(|c| {
+            c.advanced.log_level = LogLevel::Trace; // Advanced (= reset 対象)
+            c.general.startup_reset_window = true; // General (= 維持されるべき)
+        });
+        persistence::save(&state.config.get(), &path).expect("seed");
+        state.pending_reset.set(Some(ResetKind::Section(SectionId::Advanced)));
+        state.reset_confirm_visible.set(true);
+
+        apply_reset(&state, ResetKind::Section(SectionId::Advanced)).expect("reset section");
+
+        // Advanced は default、 General は維持
+        assert_eq!(
+            state.config.get().advanced.log_level,
+            LogLevel::Info,
+            "Advanced は default (Info) に reset"
+        );
+        assert!(
+            state.config.get().general.startup_reset_window,
+            "General section は touch されない (= 粒度別 reset の core property)"
+        );
+        assert!(!*state.reset_confirm_visible.get());
+        assert!(state.pending_reset.get().is_none());
+
+        // disk にも反映 (= save 経由)
+        let on_disk = persistence::load(&path).expect("load");
+        assert_eq!(on_disk.advanced.log_level, LogLevel::Info);
+        assert!(on_disk.general.startup_reset_window, "General disk 維持");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn apply_reset_section_appearance_reseeds_draft() {
+        let (state, path) = isolated_state("section-appearance");
+        state.config.update(|c| c.appearance.accent_hex = String::from("#FFCC00"));
+        state.draft_accent_hex.set(String::from("#ABCDEF"));
+        persistence::save(&state.config.get(), &path).expect("seed");
+
+        apply_reset(&state, ResetKind::Section(SectionId::Appearance)).expect("reset");
+
+        let default_accent = Config::default().appearance.accent_hex;
+        assert_eq!(state.config.get().appearance.accent_hex, default_accent);
+        assert_eq!(
+            *state.draft_accent_hex.get(),
+            default_accent,
+            "Appearance reset は draft も reseed"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn apply_reset_field_resets_only_accent_hex() {
+        let (state, path) = isolated_state("field");
+        state.config.update(|c| {
+            c.appearance.accent_hex = String::from("#FFCC00");
+            c.appearance.font_size_scale = 99.0; // 同 section 別 field (= 維持)
+            c.advanced.log_level = LogLevel::Trace; // 別 section (= 維持)
+        });
+        state.draft_accent_hex.set(String::from("#ABCDEF"));
+        persistence::save(&state.config.get(), &path).expect("seed");
+
+        apply_reset(&state, ResetKind::Field).expect("reset field");
+
+        let default_accent = Config::default().appearance.accent_hex;
+        assert_eq!(
+            state.config.get().appearance.accent_hex,
+            default_accent,
+            "accent_hex のみ default"
+        );
+        assert_eq!(
+            state.config.get().appearance.font_size_scale,
+            99.0,
+            "同 section 別 field (font_size_scale) は維持 (= field 粒度の core property)"
+        );
+        assert_eq!(
+            state.config.get().advanced.log_level,
+            LogLevel::Trace,
+            "別 section は維持"
+        );
+        assert_eq!(*state.draft_accent_hex.get(), default_accent, "draft reseed");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn apply_reset_cache_clear_is_noop_on_config() {
+        let (state, path) = isolated_state("cache");
+        state.config.update(|c| {
+            c.advanced.log_level = LogLevel::Trace;
+            c.appearance.accent_hex = String::from("#FFCC00");
+        });
+        let snapshot = state.config.get().clone();
+        state.pending_reset.set(Some(ResetKind::CacheClear));
+        state.reset_confirm_visible.set(true);
+
+        apply_reset(&state, ResetKind::CacheClear).expect("cache clear");
+
+        assert_eq!(
+            *state.config.get(),
+            snapshot,
+            "CacheClear は config を一切変更しない (= 現状 no-op)"
+        );
+        assert!(!*state.reset_confirm_visible.get(), "modal は dismiss");
+        assert!(state.pending_reset.get().is_none(), "pending clear");
+        cleanup(&path);
+    }
+
+    // ── apply_reset_confirm が pending_reset を読んで dispatch ──
+
+    #[test]
+    fn apply_reset_confirm_dispatches_via_pending_reset_section() {
+        let (state, path) = isolated_state("dispatch-section");
+        state.config.update(|c| {
+            c.advanced.log_level = LogLevel::Trace;
+            c.general.startup_reset_window = true;
+        });
+        persistence::save(&state.config.get(), &path).expect("seed");
+        // pending_reset = Section(Advanced) → apply_reset_confirm は Advanced のみ reset
+        state.pending_reset.set(Some(ResetKind::Section(SectionId::Advanced)));
+        state.reset_confirm_visible.set(true);
+
+        apply_reset_confirm(&state).expect("dispatch");
+
+        assert_eq!(state.config.get().advanced.log_level, LogLevel::Info);
+        assert!(
+            state.config.get().general.startup_reset_window,
+            "Section dispatch は他 section を touch しない"
+        );
+        cleanup(&path);
+    }
+
+    #[test]
+    fn apply_reset_confirm_none_falls_back_to_all() {
+        let (state, path) = isolated_state("dispatch-none");
+        state.config.update(|c| c.advanced.log_level = LogLevel::Trace);
+        persistence::save(&state.config.get(), &path).expect("seed");
+        // pending_reset = None → apply_reset_confirm は All に fallback (= 従来動作保全)
+        assert!(state.pending_reset.get().is_none());
+        state.reset_confirm_visible.set(true);
+
+        apply_reset_confirm(&state).expect("fallback");
+
+        assert_eq!(*state.config.get(), Config::default(), "None → All fallback");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn cancel_clears_pending_reset() {
+        let state = for_testing();
+        state.pending_reset.set(Some(ResetKind::Field));
+        state.reset_confirm_visible.set(true);
+        cancel_reset_confirm(&state);
+        assert!(state.pending_reset.get().is_none(), "cancel で pending clear");
+        assert!(!*state.reset_confirm_visible.get(), "modal dismiss");
+    }
 }
 
 #[cfg(test)]
