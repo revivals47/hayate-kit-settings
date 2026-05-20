@@ -16,11 +16,7 @@
 //! debouncer 発火。closure は widget の中に閉じ込められて呼び出せないため、
 //! helper fn 抽出で unit test が 1:1 に exercise する設計。
 
-use hayate_kit::widget::form_layout::FormLayout;
-use hayate_kit::widget::label::LabelWidget;
-use hayate_kit::widget::layout::VStack;
-use hayate_kit::widget::switch::SwitchWidget;
-use hayate_kit::Widget;
+use hayate_kit::prelude::*;
 
 use crate::lang::Strings;
 use crate::state::AppStateHandles;

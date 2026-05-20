@@ -28,10 +28,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use hayate_kit::{
-    alloc_widget_id, AppTheme, Constraints, EventResponse, ItemRect, Renderer, Size, TextEngine,
-    Widget, WidgetEvent, WidgetId,
-};
+use hayate_kit::prelude::widget_impl::*;
 
 use crate::sections::SectionId;
 use crate::state::AppStateHandles;
@@ -181,7 +178,6 @@ impl Widget for DetailContainerWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hayate_kit::widget::label::LabelWidget;
 
     /// Test helper: section → label widget の最小 stub closure factory。
     /// 本物の sections::*::build を呼ばず unit test を section-impl 依存から

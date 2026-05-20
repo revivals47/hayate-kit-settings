@@ -23,14 +23,7 @@ mod state;
 
 // 規範整合性: `use hayate_kit::...` のみ、`use hayate_platform::...` 禁止
 use clap::Parser;
-use hayate_kit::style::widget_theme_presets::app::app_theme_hayate_original;
-use hayate_kit::style::widget_theme_presets::titlebar::titlebar_theme_hayate_original;
-use hayate_kit::widget::default_chrome::build_systemlike;
-use hayate_kit::widget::layout::VStack;
-use hayate_kit::widget::overlay::OverlayPosition;
-use hayate_kit::widget::split_view::{SplitOrientation, SplitViewWidget};
-use hayate_kit::widget::tree_view::{TreeNode, TreeViewWidget};
-use hayate_kit::{App, Decorations, ReactiveRuntime, Widget, WindowPolicy, HAYATE_ORIGINAL};
+use hayate_kit::prelude::*;
 
 use crate::detail_container::DetailContainerWidget;
 use crate::lang::{Lang, Strings};

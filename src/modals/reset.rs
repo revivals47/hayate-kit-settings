@@ -7,10 +7,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use hayate_kit::widget::button::ButtonWidget;
-use hayate_kit::widget::label::LabelWidget;
-use hayate_kit::widget::layout::{HStack, VStack};
-use hayate_kit::{Constraints, ItemRect, Renderer, Size, State, TextEngine, Widget, WidgetId};
+use hayate_kit::prelude::widget_impl::*;
 
 use crate::lang::Strings;
 use crate::persistence;
@@ -267,7 +264,6 @@ mod granular_tests {
     use super::*;
     use crate::persistence::{Config, LogLevel};
     use crate::state::{for_testing, AppStateHandles, ResetKind};
-    use hayate_kit::ReactiveRuntime;
     use std::path::PathBuf;
 
     fn isolated_state(label: &str) -> (AppStateHandles, PathBuf) {
@@ -522,7 +518,6 @@ mod tests {
     use crate::lang::Lang;
     use crate::persistence::{Config, LogLevel};
     use crate::state::{for_testing, AppStateHandles};
-    use hayate_kit::ReactiveRuntime;
     use std::path::PathBuf;
 
     /// Test isolation helper: per-test unique config_path で disk I/O 衝突を回避。
