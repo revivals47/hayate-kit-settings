@@ -125,7 +125,7 @@ impl AppStateHandles {
         let initial_accent = initial_config.appearance.accent_hex.clone();
         Self {
             config: runtime.create_state(initial_config),
-            selected_section: runtime.create_state(SectionId::initial_from_env()),
+            selected_section: runtime.create_state(SectionId::default()),
             search_query: runtime.create_state(String::new()),
             accent_picker_visible: runtime.create_state(false),
             reset_confirm_visible: runtime.create_state(false),

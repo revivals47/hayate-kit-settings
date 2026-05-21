@@ -72,6 +72,9 @@ fn config_path() -> std::path::PathBuf {
 /// the default.
 fn window_size_from_env() -> (u32, u32) {
     const DEFAULT: (u32, u32) = (800, 540);
+    // Matches `App::with_min_size` below — clamp up so a too-small request
+    // never starts the window beneath its own declared minimum.
+    const MIN: (u32, u32) = (560, 400);
     let Ok(spec) = std::env::var("HAYATE_WINDOW_SIZE") else {
         return DEFAULT;
     };
@@ -79,7 +82,7 @@ fn window_size_from_env() -> (u32, u32) {
         return DEFAULT;
     };
     match (w.trim().parse::<u32>(), h.trim().parse::<u32>()) {
-        (Ok(w), Ok(h)) if w >= 100 && h >= 100 => (w, h),
+        (Ok(w), Ok(h)) => (w.max(MIN.0), h.max(MIN.1)),
         _ => DEFAULT,
     }
 }
@@ -254,6 +257,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let theme_handle = app.app_theme();
     let app_state =
         AppStateHandles::new(&runtime, initial_config, cfg_path).with_theme_handle(theme_handle);
+
+    // Dev / screenshot hook: HAYATE_SETTINGS_SECTION overrides the initial
+    // section. Read here (before the run loop, after construction) rather than
+    // inside AppStateHandles::new so the state constructor stays free of
+    // process-env side effects — tests and non-launch callers get the default.
+    app_state
+        .selected_section
+        .set(SectionId::initial_from_env());
 
     // Phase 1 step 6 skeleton: SplitView { Sidebar (TreeView nav) + Detail pane }
     // HStack ではなく SplitView を使用する理由 (= R13 fix 後 visual re-verify で発覚):
