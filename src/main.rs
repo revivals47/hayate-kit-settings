@@ -131,14 +131,18 @@ fn build_detail(
     section: sections::SectionId,
     state: &AppStateHandles,
 ) -> Box<dyn Widget> {
-    match section {
+    let section: Box<dyn Widget> = match section {
         sections::SectionId::General => sections::general::build(strings, state),
         sections::SectionId::Appearance => sections::appearance::build(strings, state),
         sections::SectionId::Accessibility => sections::accessibility::build(strings, state),
         sections::SectionId::Ime => sections::ime::build(strings, state),
         sections::SectionId::Advanced => sections::advanced::build(strings, state),
         sections::SectionId::Widgets => sections::widgets::build(strings, state),
-    }
+    };
+    // 縦スクロール対応: viewport を超える長い section (Widgets 等) を
+    // ScrollArea で包む。横は bound 維持 (子に unbounded width を渡さない)。
+    // section ごとに包むため section 切替で scroll 位置は top にリセットされる。
+    Box::new(ScrollAreaWidget::from_box(section))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
