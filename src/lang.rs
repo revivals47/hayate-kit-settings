@@ -97,6 +97,7 @@ pub struct Strings {
     pub section_accessibility: &'static str,
     pub section_ime: &'static str,
     pub section_advanced: &'static str,
+    pub section_widgets: &'static str,
 
     // Detail pane stub messages
     pub coming_soon: &'static str,
@@ -124,6 +125,7 @@ impl Strings {
         section_accessibility: "アクセシビリティ",
         section_ime: "入力 (IME)",
         section_advanced: "詳細設定",
+        section_widgets: "ウィジェット",
         coming_soon: "実装予定 (Phase 2 で section 内容を順次 land)",
     };
 
@@ -148,6 +150,7 @@ impl Strings {
         section_accessibility: "Accessibility",
         section_ime: "Input (IME)",
         section_advanced: "Advanced",
+        section_widgets: "Widgets",
         coming_soon: "Coming soon (= Phase 2 で section impl land)",
     };
 }

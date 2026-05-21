@@ -80,7 +80,7 @@ fn reset_config(lang: Lang) -> Result<(), Box<dyn std::error::Error>> {
 /// Sidebar = Search bar (上) + TreeView nav (下) を VStack で積む構成
 /// (= Phase 2 wave 2 batch 3 で拡張、 RFC v0.5 §5.2.7 search bar integration)。
 ///
-/// TreeView nav = 5 root sections + Appearance sub-tree (3 sub-nodes)。
+/// TreeView nav = 6 root sections + Appearance sub-tree (3 sub-nodes)。
 /// select callback / search filter → selection 更新 reactive bind は wave 3b
 /// dispatch dep、 本 wave 3a では widget composition + state handle 渡しのみ。
 fn build_sidebar(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widget> {
@@ -94,6 +94,7 @@ fn build_sidebar(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn 
         TreeNode::new(strings.section_accessibility),
         TreeNode::new(strings.section_ime),
         TreeNode::new(strings.section_advanced),
+        TreeNode::new(strings.section_widgets),
     ];
 
     // TreeView nav 選択 → state.selected_section.set で reactive 配線
@@ -122,7 +123,7 @@ fn build_sidebar(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn 
 /// 配線する際に使用化される。
 ///
 /// 各 section impl は src/sections/{general,appearance,accessibility,ime,
-/// advanced}.rs に分離。 R13 systemic fix 完遂後は LabelWidget 内 hardcoded
+/// advanced,widgets}.rs に分離。 R13 systemic fix 完遂後は LabelWidget 内 hardcoded
 /// HAYATE_DARK 問題解消、 caller .with_color() override は不要 (= 各 section
 /// module で active_theme() 経由)。
 fn build_detail(
@@ -136,6 +137,7 @@ fn build_detail(
         sections::SectionId::Accessibility => sections::accessibility::build(strings, state),
         sections::SectionId::Ime => sections::ime::build(strings, state),
         sections::SectionId::Advanced => sections::advanced::build(strings, state),
+        sections::SectionId::Widgets => sections::widgets::build(strings, state),
     }
 }
 

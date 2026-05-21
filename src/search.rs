@@ -91,6 +91,7 @@ pub fn filter_sections(query: &str, _strings: &Strings) -> Vec<SectionId> {
         SectionId::Accessibility,
         SectionId::Ime,
         SectionId::Advanced,
+        SectionId::Widgets,
     ];
     if q.is_empty() {
         return all.to_vec();
@@ -117,6 +118,7 @@ fn label_pair(sid: SectionId, ja: &Strings, en: &Strings) -> (&'static str, &'st
         SectionId::Accessibility => (ja.section_accessibility, en.section_accessibility),
         SectionId::Ime => (ja.section_ime, en.section_ime),
         SectionId::Advanced => (ja.section_advanced, en.section_advanced),
+        SectionId::Widgets => (ja.section_widgets, en.section_widgets),
     }
 }
 
@@ -134,13 +136,14 @@ mod tests {
 
     #[test]
     fn filter_empty_query_returns_all() {
-        // empty query = 全 5 section、 default 順 (General/Appearance/
-        // Accessibility/Ime/Advanced)。
+        // empty query = 全 6 section、 default 順 (General/Appearance/
+        // Accessibility/Ime/Advanced/Widgets)。
         let strings = Lang::En.strings();
         let r = filter_sections("", strings);
-        assert_eq!(r.len(), 5);
+        assert_eq!(r.len(), 6);
         assert_eq!(r[0], SectionId::General);
         assert_eq!(r[4], SectionId::Advanced);
+        assert_eq!(r[5], SectionId::Widgets);
     }
 
     #[test]
@@ -148,7 +151,7 @@ mod tests {
         // whitespace-only query は trim 後 empty 扱い = 全 section。
         let strings = Lang::En.strings();
         let r = filter_sections("   ", strings);
-        assert_eq!(r.len(), 5);
+        assert_eq!(r.len(), 6);
     }
 
     #[test]
