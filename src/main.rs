@@ -187,13 +187,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // HAYATE_ORIGINAL + app_theme_hayate_original() と同一 default 挙動を維持し
     // つつ、 persist された skin を base palette + AppTheme の両 half で復元する
     // (= runtime swap の set_bundle と同じ pair、 startup と swap で path 統一)。
-    let titlebar = titlebar_theme_hayate_original();
+    // Phase 3b skin-aware chrome: 起動時の title bar も永続化 skin に連動
+    // (titlebar_theme_for)。chrome は下の build_systemlike(Some(&titlebar)) で
+    // 組むのが live path。App::with_titlebar_theme は run() が消費しない死に経路
+    // (deprecated) なので呼ばない。runtime swap は ThemeBundle.titlebar_theme 経由。
+    let titlebar = crate::sections::appearance::titlebar_theme_for(initial_theme_id);
     let policy = WindowPolicy::default();
     let initial_palette = crate::sections::appearance::theme_for(initial_theme_id);
     let initial_theme = crate::sections::appearance::app_theme_for(initial_theme_id);
     let app = App::new(strings.app_title, 800, 540)
         .with_theme(initial_palette)
-        .with_titlebar_theme(titlebar.clone())
         .with_app_theme(initial_theme)
         .with_window_policy(policy.clone())
         .with_min_size(560, 400)

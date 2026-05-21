@@ -48,6 +48,14 @@ use hayate_kit::style::widget_theme_presets::app::{
 use hayate_kit::style::theme::{
     MACOS9_THEME, MACOS_BIG_SUR_THEME, WIN10_THEME, WIN95_THEME, XP_LUNA_THEME,
 };
+// 6 skin の title bar theme (= titlebar_theme_for mapping)。ThemeBundle.titlebar_theme
+// に載せて runtime swap で title bar も skin 連動切替 (Phase 3b skin-aware chrome)。
+// TitleBarTheme 型は hayate_kit crate root から reach。
+use hayate_kit::TitleBarTheme;
+use hayate_kit::style::widget_theme_presets::titlebar::{
+    titlebar_theme_hayate_original, titlebar_theme_mac_os9, titlebar_theme_macos_big_sur,
+    titlebar_theme_win10, titlebar_theme_win95, titlebar_theme_xp_luna,
+};
 
 use crate::lang::Strings;
 use crate::modals::wcag::{compute_wcag_status, parse_hex_or_default};
@@ -102,15 +110,33 @@ pub fn theme_for(id: ThemeId) -> &'static Theme {
     }
 }
 
-/// Pair a [`ThemeId`]'s base palette ([`theme_for`]) and per-widget aggregate
-/// ([`app_theme_for`]) into a [`ThemeBundle`] for a full runtime theme swap
-/// (`AppThemeHandle::set_bundle`). Carrying both halves is what makes a skin
-/// switch re-colour `active_theme()` widgets + the frame background, not just
-/// the injected `AppTheme` — the gap the deprecated `AppThemeHandle::set` left.
+/// Map a [`ThemeId`] to its GUI_kit [`TitleBarTheme`] — the per-skin title bar
+/// (navy Win95, glossy XP, …). Carried in [`theme_bundle_for`] so a runtime
+/// swap re-themes the title bar in lock-step (Phase 3b skin-aware chrome).
+/// `match` is exhaustive so a future [`ThemeId`] surfaces here at compile time.
+pub fn titlebar_theme_for(id: ThemeId) -> TitleBarTheme {
+    match id {
+        ThemeId::HayateOriginal => titlebar_theme_hayate_original(),
+        ThemeId::Win95 => titlebar_theme_win95(),
+        ThemeId::XpLuna => titlebar_theme_xp_luna(),
+        ThemeId::Win10 => titlebar_theme_win10(),
+        ThemeId::MacOs9 => titlebar_theme_mac_os9(),
+        ThemeId::MacOsBigSur => titlebar_theme_macos_big_sur(),
+    }
+}
+
+/// Pair a [`ThemeId`]'s base palette ([`theme_for`]), per-widget aggregate
+/// ([`app_theme_for`]) and title bar ([`titlebar_theme_for`]) into a
+/// [`ThemeBundle`] for a full runtime theme swap (`AppThemeHandle::set_bundle`).
+/// Carrying all three halves is what makes a skin switch re-colour
+/// `active_theme()` widgets + the frame background + the title bar together,
+/// not just the injected `AppTheme` — the gap the deprecated
+/// `AppThemeHandle::set` left.
 pub fn theme_bundle_for(id: ThemeId) -> ThemeBundle {
     ThemeBundle {
         theme: theme_for(id).clone(),
         app_theme: Rc::new(app_theme_for(id)),
+        titlebar_theme: Some(titlebar_theme_for(id)),
     }
 }
 
