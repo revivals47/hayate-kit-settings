@@ -833,6 +833,7 @@ dependencies = [
  "font8x8",
  "libc",
  "memmap2",
+ "png",
  "rustix",
  "tiny-skia",
  "unicode-segmentation",

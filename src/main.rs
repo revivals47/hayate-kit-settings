@@ -52,13 +52,36 @@ struct Cli {
 /// Resolve XDG_CONFIG_HOME/hayate-kit-settings/config.json path with
 /// `$HOME/.config` fallback (= XDG Base Directory Specification minimal impl)
 fn config_path() -> std::path::PathBuf {
+    // XDG Base Directory spec: an *empty* XDG_CONFIG_HOME must be treated as
+    // unset (fall back to $HOME/.config), not as a relative base. `var_os`
+    // returns Some("") for an exported-but-empty var, so filter it out.
     let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
             let home = std::env::var_os("HOME").unwrap_or_default();
             std::path::PathBuf::from(home).join(".config")
         });
     base.join("hayate-kit-settings").join("config.json")
+}
+
+/// Dev / screenshot hook: `HAYATE_WINDOW_SIZE=<W>x<H>` overrides the initial
+/// window size (default 800x540). Useful for headless captures of scrollable
+/// sections — a taller window renders the whole content into the CPU frame
+/// (`HAYATE_SCREENSHOT`) without needing scroll input. Unset / unparsable →
+/// the default.
+fn window_size_from_env() -> (u32, u32) {
+    const DEFAULT: (u32, u32) = (800, 540);
+    let Ok(spec) = std::env::var("HAYATE_WINDOW_SIZE") else {
+        return DEFAULT;
+    };
+    let Some((w, h)) = spec.split_once(['x', 'X']) else {
+        return DEFAULT;
+    };
+    match (w.trim().parse::<u32>(), h.trim().parse::<u32>()) {
+        (Ok(w), Ok(h)) if w >= 100 && h >= 100 => (w, h),
+        _ => DEFAULT,
+    }
 }
 
 /// Safe boot mode action: rename existing config to .bak then report path,
@@ -201,7 +224,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let policy = WindowPolicy::default();
     let initial_palette = crate::sections::appearance::theme_for(initial_theme_id);
     let initial_theme = crate::sections::appearance::app_theme_for(initial_theme_id);
-    let app = App::new(strings.app_title, 800, 540)
+    let (win_w, win_h) = window_size_from_env();
+    let app = App::new(strings.app_title, win_w, win_h)
         .with_theme(initial_palette)
         .with_app_theme(initial_theme)
         .with_window_policy(policy.clone())
