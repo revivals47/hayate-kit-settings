@@ -49,20 +49,20 @@ struct Cli {
     lang: Option<String>,
 }
 
-/// Resolve XDG_CONFIG_HOME/hayate-kit-settings/config.json path with
-/// `$HOME/.config` fallback (= XDG Base Directory Specification minimal impl)
+/// Resolve the config file path. XDG/HOME resolution lives in the single
+/// source of truth [`persistence::default_config_path`] (= no drift between
+/// app and persistence layer, codex PR #20 low finding). The only main-side
+/// policy is the degenerate fallback: when neither `XDG_CONFIG_HOME` nor
+/// `HOME` yields an absolute base (e.g. a stripped env), use a CWD-relative
+/// last resort so the app still launches with a usable — if non-standard —
+/// path, preserving the previous infallible contract this app's call sites
+/// depend on.
 fn config_path() -> std::path::PathBuf {
-    // XDG Base Directory spec: an *empty* XDG_CONFIG_HOME must be treated as
-    // unset (fall back to $HOME/.config), not as a relative base. `var_os`
-    // returns Some("") for an exported-but-empty var, so filter it out.
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .filter(|v| !v.is_empty())
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = std::env::var_os("HOME").unwrap_or_default();
-            std::path::PathBuf::from(home).join(".config")
-        });
-    base.join("hayate-kit-settings").join("config.json")
+    persistence::default_config_path().unwrap_or_else(|| {
+        std::path::PathBuf::from(".config")
+            .join("hayate-kit-settings")
+            .join("config.json")
+    })
 }
 
 /// Dev / screenshot hook: `HAYATE_WINDOW_SIZE=<W>x<H>` overrides the initial
@@ -71,19 +71,29 @@ fn config_path() -> std::path::PathBuf {
 /// (`HAYATE_SCREENSHOT`) without needing scroll input. Unset / unparsable →
 /// the default.
 fn window_size_from_env() -> (u32, u32) {
-    const DEFAULT: (u32, u32) = (800, 540);
-    // Matches `App::with_min_size` below — clamp up so a too-small request
-    // never starts the window beneath its own declared minimum.
-    const MIN: (u32, u32) = (560, 400);
     let Ok(spec) = std::env::var("HAYATE_WINDOW_SIZE") else {
-        return DEFAULT;
+        return WINDOW_SIZE_DEFAULT;
     };
+    parse_window_size(&spec)
+}
+
+/// Initial window size when `HAYATE_WINDOW_SIZE` is unset / unparsable.
+const WINDOW_SIZE_DEFAULT: (u32, u32) = (800, 540);
+/// Floor for a `HAYATE_WINDOW_SIZE` request — matches `App::with_min_size`
+/// below so a too-small request never starts the window beneath its own
+/// declared minimum.
+const WINDOW_SIZE_MIN: (u32, u32) = (560, 400);
+
+/// Parse a `<W>x<H>` window-size spec (case-insensitive separator), clamping
+/// each axis up to [`WINDOW_SIZE_MIN`]. Unparsable → [`WINDOW_SIZE_DEFAULT`].
+/// Pure (no env read) so it is unit-testable without env mutation.
+fn parse_window_size(spec: &str) -> (u32, u32) {
     let Some((w, h)) = spec.split_once(['x', 'X']) else {
-        return DEFAULT;
+        return WINDOW_SIZE_DEFAULT;
     };
     match (w.trim().parse::<u32>(), h.trim().parse::<u32>()) {
-        (Ok(w), Ok(h)) => (w.max(MIN.0), h.max(MIN.1)),
-        _ => DEFAULT,
+        (Ok(w), Ok(h)) => (w.max(WINDOW_SIZE_MIN.0), h.max(WINDOW_SIZE_MIN.1)),
+        _ => WINDOW_SIZE_DEFAULT,
     }
 }
 
@@ -338,4 +348,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     app.run(Box::new(root))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{config_path, parse_window_size, WINDOW_SIZE_DEFAULT, WINDOW_SIZE_MIN};
+
+    #[test]
+    fn parse_window_size_valid() {
+        assert_eq!(parse_window_size("1024x768"), (1024, 768));
+    }
+
+    #[test]
+    fn parse_window_size_uppercase_separator() {
+        assert_eq!(parse_window_size("640X480"), (640, 480));
+    }
+
+    #[test]
+    fn parse_window_size_clamps_below_minimum() {
+        // codex PR #20: a request under the declared min must clamp up, not
+        // start the window beneath App::with_min_size (560x400).
+        assert_eq!(parse_window_size("559x399"), WINDOW_SIZE_MIN);
+        assert_eq!(parse_window_size("100x100"), WINDOW_SIZE_MIN);
+    }
+
+    #[test]
+    fn parse_window_size_unparsable_falls_back_to_default() {
+        assert_eq!(parse_window_size("garbage"), WINDOW_SIZE_DEFAULT);
+        assert_eq!(parse_window_size("800"), WINDOW_SIZE_DEFAULT);
+        assert_eq!(parse_window_size("axb"), WINDOW_SIZE_DEFAULT);
+        assert_eq!(parse_window_size(""), WINDOW_SIZE_DEFAULT);
+    }
+
+    #[test]
+    fn config_path_ends_with_canonical_suffix() {
+        // main::config_path delegates resolution to persistence; whatever the
+        // runner's env, the result must carry the canonical app suffix (either
+        // the resolved XDG/HOME path or the degenerate CWD-relative fallback).
+        assert!(config_path().ends_with("hayate-kit-settings/config.json"));
+    }
 }
