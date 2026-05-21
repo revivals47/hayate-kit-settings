@@ -106,6 +106,10 @@ fn reset_section_in_config(config: &mut persistence::Config, sid: SectionId) {
         SectionId::Accessibility => config.accessibility = AccessibilityConfig::default(),
         SectionId::Ime => config.ime = ImeConfig::default(),
         SectionId::Advanced => config.advanced = AdvancedConfig::default(),
+        // Widgets は widget showcase で永続 config を持たない (= reset 対象なし)。
+        // showcase 側に reset button も無いため実運用で本 arm には到達しないが、
+        // 網羅性のため no-op として明示。
+        SectionId::Widgets => {}
     }
 }
 
@@ -139,6 +143,7 @@ fn section_label(sid: SectionId) -> &'static str {
         SectionId::Accessibility => "Accessibility",
         SectionId::Ime => "IME",
         SectionId::Advanced => "Advanced",
+        SectionId::Widgets => "Widgets",
     }
 }
 

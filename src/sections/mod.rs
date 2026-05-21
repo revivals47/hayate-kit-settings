@@ -21,6 +21,7 @@ pub mod appearance;
 pub mod accessibility;
 pub mod ime;
 pub mod advanced;
+pub mod widgets;
 
 /// Section identifier — TreeView nav selection と detail pane build dispatch
 /// の binding に使用 (= wave 2/3 reactive bind 配線時)。
@@ -36,6 +37,9 @@ pub enum SectionId {
     Accessibility,
     Ime,
     Advanced,
+    /// Widgets showcase (= Phase 3b 第4波、 全 widget を state 込みで並べ
+    /// behavioral 評価する場)。 sidebar root index 5。
+    Widgets,
 }
 
 impl SectionId {
@@ -56,6 +60,7 @@ impl SectionId {
     /// - `[2]` = Accessibility
     /// - `[3]` = IME
     /// - `[4]` = Advanced
+    /// - `[5]` = Widgets
     ///
     /// Empty / out-of-range paths return `None` so caller can fall back
     /// (e.g. keep current selection rather than panic). All Appearance sub-
@@ -75,6 +80,7 @@ impl SectionId {
             2 => Some(SectionId::Accessibility),
             3 => Some(SectionId::Ime),
             4 => Some(SectionId::Advanced),
+            5 => Some(SectionId::Widgets),
             _ => None,
         }
     }
@@ -91,6 +97,7 @@ mod tests {
         assert_eq!(SectionId::from_tree_path(&[2]), Some(SectionId::Accessibility));
         assert_eq!(SectionId::from_tree_path(&[3]), Some(SectionId::Ime));
         assert_eq!(SectionId::from_tree_path(&[4]), Some(SectionId::Advanced));
+        assert_eq!(SectionId::from_tree_path(&[5]), Some(SectionId::Widgets));
     }
 
     #[test]
@@ -107,8 +114,8 @@ mod tests {
 
     #[test]
     fn from_tree_path_out_of_range_returns_none() {
-        // 5 root sections (indices 0..=4); 5 and beyond are invalid
-        assert_eq!(SectionId::from_tree_path(&[5]), None);
+        // 6 root sections (indices 0..=5); 6 and beyond are invalid
+        assert_eq!(SectionId::from_tree_path(&[6]), None);
         assert_eq!(SectionId::from_tree_path(&[99]), None);
     }
 

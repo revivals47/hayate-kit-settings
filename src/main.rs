@@ -80,7 +80,7 @@ fn reset_config(lang: Lang) -> Result<(), Box<dyn std::error::Error>> {
 /// Sidebar = Search bar (上) + TreeView nav (下) を VStack で積む構成
 /// (= Phase 2 wave 2 batch 3 で拡張、 RFC v0.5 §5.2.7 search bar integration)。
 ///
-/// TreeView nav = 5 root sections + Appearance sub-tree (3 sub-nodes)。
+/// TreeView nav = 6 root sections + Appearance sub-tree (3 sub-nodes)。
 /// select callback / search filter → selection 更新 reactive bind は wave 3b
 /// dispatch dep、 本 wave 3a では widget composition + state handle 渡しのみ。
 fn build_sidebar(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn Widget> {
@@ -94,6 +94,7 @@ fn build_sidebar(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn 
         TreeNode::new(strings.section_accessibility),
         TreeNode::new(strings.section_ime),
         TreeNode::new(strings.section_advanced),
+        TreeNode::new(strings.section_widgets),
     ];
 
     // TreeView nav 選択 → state.selected_section.set で reactive 配線
@@ -122,7 +123,7 @@ fn build_sidebar(strings: &'static Strings, state: &AppStateHandles) -> Box<dyn 
 /// 配線する際に使用化される。
 ///
 /// 各 section impl は src/sections/{general,appearance,accessibility,ime,
-/// advanced}.rs に分離。 R13 systemic fix 完遂後は LabelWidget 内 hardcoded
+/// advanced,widgets}.rs に分離。 R13 systemic fix 完遂後は LabelWidget 内 hardcoded
 /// HAYATE_DARK 問題解消、 caller .with_color() override は不要 (= 各 section
 /// module で active_theme() 経由)。
 fn build_detail(
@@ -130,13 +131,18 @@ fn build_detail(
     section: sections::SectionId,
     state: &AppStateHandles,
 ) -> Box<dyn Widget> {
-    match section {
+    let section: Box<dyn Widget> = match section {
         sections::SectionId::General => sections::general::build(strings, state),
         sections::SectionId::Appearance => sections::appearance::build(strings, state),
         sections::SectionId::Accessibility => sections::accessibility::build(strings, state),
         sections::SectionId::Ime => sections::ime::build(strings, state),
         sections::SectionId::Advanced => sections::advanced::build(strings, state),
-    }
+        sections::SectionId::Widgets => sections::widgets::build(strings, state),
+    };
+    // 縦スクロール対応: viewport を超える長い section (Widgets 等) を
+    // ScrollArea で包む。横は bound 維持 (子に unbounded width を渡さない)。
+    // section ごとに包むため section 切替で scroll 位置は top にリセットされる。
+    Box::new(ScrollAreaWidget::from_box(section))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -182,15 +188,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // (= RFC v0.2 §1.3 「全 opt-in pattern hard-baked」規範整合)
     // Decorations::SystemLike + build_systemlike で close/min/max button 標準装備
     // Phase 3a: 起動時 initial theme = 永続化された theme_id から解決
-    // (= app_theme_for mapping)。 旧 config (theme_id 不在) は serde(default) で
-    // HayateOriginal に補完されるため、 従来 hard-coded app_theme_hayate_original()
-    // と同一 default 挙動を維持しつつ、 persist された skin を起動時に復元する。
-    let titlebar = titlebar_theme_hayate_original();
+    // (= theme_for / app_theme_for mapping)。 旧 config (theme_id 不在) は
+    // serde(default) で HayateOriginal に補完されるため、 従来 hard-coded
+    // HAYATE_ORIGINAL + app_theme_hayate_original() と同一 default 挙動を維持し
+    // つつ、 persist された skin を base palette + AppTheme の両 half で復元する
+    // (= runtime swap の set_bundle と同じ pair、 startup と swap で path 統一)。
+    // Phase 3b skin-aware chrome: 起動時の title bar も永続化 skin に連動
+    // (titlebar_theme_for)。chrome は下の build_systemlike(Some(&titlebar)) で
+    // 組むのが live path。App::with_titlebar_theme は run() が消費しない死に経路
+    // (deprecated) なので呼ばない。runtime swap は ThemeBundle.titlebar_theme 経由。
+    let titlebar = crate::sections::appearance::titlebar_theme_for(initial_theme_id);
     let policy = WindowPolicy::default();
+    let initial_palette = crate::sections::appearance::theme_for(initial_theme_id);
     let initial_theme = crate::sections::appearance::app_theme_for(initial_theme_id);
     let app = App::new(strings.app_title, 800, 540)
-        .with_theme(&HAYATE_ORIGINAL)
-        .with_titlebar_theme(titlebar.clone())
+        .with_theme(initial_palette)
         .with_app_theme(initial_theme)
         .with_window_policy(policy.clone())
         .with_min_size(560, 400)
@@ -211,7 +223,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = app.with_decorations(Decorations::SystemLike(chrome));
 
     // Phase 3a: AppThemeHandle を取得して AppStateHandles に注入 (= Theme switcher
-    // ComboBox on_select → handle.set(app_theme_for(id)) で runtime theme swap)。
+    // ComboBox on_select → handle.set_bundle(theme_bundle_for(id)) で runtime theme swap)。
     // App 構築後でないと app.app_theme() が呼べないため、 AppStateHandles::new を
     // ここまで遅延 (= 上記 initial_theme_id を Copy で先取りした理由)。 handle は
     // Rc cell を clone するだけなので app の builder move を跨いでも有効。

@@ -190,6 +190,7 @@ mod tests {
                 SectionId::Accessibility => "accessibility",
                 SectionId::Ime => "ime",
                 SectionId::Advanced => "advanced",
+                SectionId::Widgets => "widgets",
             };
             Box::new(LabelWidget::new(name, 14.0))
         }

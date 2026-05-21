@@ -102,8 +102,8 @@ pub struct AppStateHandles {
     /// `persistence::save(&*config.get(), &config_path)` 呼出に使用。
     pub config_path: PathBuf,
     /// Runtime theme swap handle (= Phase 3a、 `App::app_theme()` 由来)。
-    /// Theme switcher ComboBox の `on_select` が `handle.set(app_theme_for(id))` で
-    /// app-wide theme を runtime 切替する。
+    /// Theme switcher ComboBox の `on_select` が `handle.set_bundle(theme_bundle_for(id))`
+    /// で app-wide theme (base palette + per-widget AppTheme) を runtime 切替する。
     ///
     /// `Option` な理由: [`AppThemeHandle`] は `App::app_theme()` からのみ取得可能
     /// (= 内部 `Rc` cell を共有)、 production では [`Self::with_theme_handle`] で
