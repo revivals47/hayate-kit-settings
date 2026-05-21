@@ -48,6 +48,23 @@ impl SectionId {
         SectionId::General
     }
 
+    /// Dev / screenshot hook: `HAYATE_SETTINGS_SECTION=<id>` overrides the
+    /// section shown on launch (`general` / `appearance` / `accessibility` /
+    /// `ime` / `advanced` / `widgets`). Unset or unrecognized falls back to
+    /// [`default`]. Lets headless captures (`HAYATE_SCREENSHOT`) target any
+    /// section without a pointer click.
+    pub fn initial_from_env() -> Self {
+        match std::env::var("HAYATE_SETTINGS_SECTION").ok().as_deref() {
+            Some("general") => SectionId::General,
+            Some("appearance") => SectionId::Appearance,
+            Some("accessibility") => SectionId::Accessibility,
+            Some("ime") => SectionId::Ime,
+            Some("advanced") => SectionId::Advanced,
+            Some("widgets") => SectionId::Widgets,
+            _ => SectionId::default(),
+        }
+    }
+
     /// Map a `TreeView` selection path (= `Vec<usize>` of nested indices) to
     /// the corresponding `SectionId`。
     ///
