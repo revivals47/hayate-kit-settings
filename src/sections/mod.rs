@@ -48,6 +48,36 @@ impl SectionId {
         SectionId::General
     }
 
+    /// Dev / screenshot hook: `HAYATE_SETTINGS_SECTION=<id>` overrides the
+    /// section shown on launch (`general` / `appearance` / `accessibility` /
+    /// `ime` / `advanced` / `widgets`). Unset or unrecognized falls back to
+    /// [`default`]. Lets headless captures (`HAYATE_SCREENSHOT`) target any
+    /// section without a pointer click.
+    pub fn initial_from_env() -> Self {
+        std::env::var("HAYATE_SETTINGS_SECTION")
+            .ok()
+            .and_then(|v| Self::section_from_raw(&v))
+            .unwrap_or_else(SectionId::default)
+    }
+
+    /// Map a raw `HAYATE_SETTINGS_SECTION` value to its section, tolerating
+    /// surrounding whitespace and ASCII case (= parity with the forgiving
+    /// `HAYATE_WINDOW_SIZE` parse; codex PR #20 low finding: untrimmed/exact
+    /// match was inconsistent — `appearance ` or `IME` silently fell back).
+    /// Unrecognized → `None`. Pure (no env read) so it is unit-testable
+    /// without process-global env mutation.
+    fn section_from_raw(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "general" => Some(SectionId::General),
+            "appearance" => Some(SectionId::Appearance),
+            "accessibility" => Some(SectionId::Accessibility),
+            "ime" => Some(SectionId::Ime),
+            "advanced" => Some(SectionId::Advanced),
+            "widgets" => Some(SectionId::Widgets),
+            _ => None,
+        }
+    }
+
     /// Map a `TreeView` selection path (= `Vec<usize>` of nested indices) to
     /// the corresponding `SectionId`。
     ///
@@ -132,5 +162,59 @@ mod tests {
     #[test]
     fn default_is_general() {
         assert_eq!(SectionId::default(), SectionId::General);
+    }
+
+    // ── HAYATE_SETTINGS_SECTION parsing (env-free pure core) ────────────
+    // section_from_raw takes the raw string so these run without the
+    // process-global env mutation that would race under parallel cargo test.
+
+    #[test]
+    fn section_from_raw_exact_values() {
+        assert_eq!(SectionId::section_from_raw("general"), Some(SectionId::General));
+        assert_eq!(
+            SectionId::section_from_raw("appearance"),
+            Some(SectionId::Appearance)
+        );
+        assert_eq!(
+            SectionId::section_from_raw("accessibility"),
+            Some(SectionId::Accessibility)
+        );
+        assert_eq!(SectionId::section_from_raw("ime"), Some(SectionId::Ime));
+        assert_eq!(SectionId::section_from_raw("advanced"), Some(SectionId::Advanced));
+        assert_eq!(SectionId::section_from_raw("widgets"), Some(SectionId::Widgets));
+    }
+
+    #[test]
+    fn section_from_raw_trims_surrounding_whitespace() {
+        assert_eq!(
+            SectionId::section_from_raw("  appearance  "),
+            Some(SectionId::Appearance)
+        );
+        assert_eq!(SectionId::section_from_raw("\time\n"), Some(SectionId::Ime));
+    }
+
+    #[test]
+    fn section_from_raw_is_ascii_case_insensitive() {
+        assert_eq!(SectionId::section_from_raw("IME"), Some(SectionId::Ime));
+        assert_eq!(
+            SectionId::section_from_raw("Appearance"),
+            Some(SectionId::Appearance)
+        );
+        assert_eq!(SectionId::section_from_raw("WIDGETS"), Some(SectionId::Widgets));
+    }
+
+    #[test]
+    fn section_from_raw_combines_trim_and_case() {
+        assert_eq!(
+            SectionId::section_from_raw("  Accessibility \t"),
+            Some(SectionId::Accessibility)
+        );
+    }
+
+    #[test]
+    fn section_from_raw_unrecognized_returns_none() {
+        assert_eq!(SectionId::section_from_raw("nonsense"), None);
+        assert_eq!(SectionId::section_from_raw(""), None);
+        assert_eq!(SectionId::section_from_raw("   "), None);
     }
 }

@@ -51,6 +51,7 @@
 // 済 (= reachable from cargo test --bins)、 文字通り dead ではない。
 #![allow(dead_code)]
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -321,14 +322,41 @@ fn migrate_v0_to_v1(_prev: V0Config) -> Config {
 
 // ── load / save / reset ────────────────────────────────────────────────
 
-/// Resolve canonical config file path (= XDG_CONFIG_HOME 優先、 fallback
-/// `$HOME/.config`)。 環境変数いずれも未設定なら `None`。
-pub fn default_config_path() -> Option<PathBuf> {
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+/// Resolve the canonical config file path from explicit `XDG_CONFIG_HOME` /
+/// `HOME` values — the env-free core of [`default_config_path`].
+///
+/// XDG Base Directory rules applied here:
+/// - an *empty* value == unset (an exported-but-empty var must not become a base)
+/// - a *relative* `XDG_CONFIG_HOME` must be ignored (only an absolute path is a
+///   valid base); fall through to `$HOME/.config`
+/// - an empty / unset `HOME` yields `None` rather than a CWD-relative `.config`
+///   (= same empty==unset rule applied to `HOME` for consistency)
+///
+/// Pure (no process-env read) so it is unit-testable without the global env
+/// mutation that would race under parallel `cargo test`.
+fn resolve_config_path(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    let config_home = xdg_config_home
         .filter(|s| !s.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+        .filter(|p| p.is_absolute())
+        .or_else(|| {
+            home.filter(|s| !s.is_empty())
+                .map(|h| PathBuf::from(h).join(".config"))
+        })?;
     Some(config_home.join("hayate-kit-settings").join("config.json"))
+}
+
+/// Resolve canonical config file path (= `XDG_CONFIG_HOME` 優先、 fallback
+/// `$HOME/.config`)。 いずれも絶対 base を与えなければ `None`
+/// (= XDG: empty / relative は unset 扱い)。
+///
+/// 単一の path-resolution source。 `main::config_path` も本 fn 経由で解決し、
+/// resolution logic の drift を防ぐ (= codex PR #20 low finding: 二重実装解消)。
+pub fn default_config_path() -> Option<PathBuf> {
+    resolve_config_path(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
 }
 
 /// Parse raw JSON into a [`Config`]、 必要に応じて migrate chain を dispatch。
@@ -528,6 +556,63 @@ impl Default for DebouncedSaver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── config path resolution (env-free pure core) ─────────────────────
+    // resolve_config_path takes explicit env values so these run without the
+    // process-global env mutation that would race under parallel cargo test.
+
+    #[test]
+    fn resolve_config_path_absolute_xdg() {
+        let p = resolve_config_path(Some(OsStr::new("/xdg")), Some(OsStr::new("/home/u")));
+        assert_eq!(p, Some(PathBuf::from("/xdg/hayate-kit-settings/config.json")));
+    }
+
+    #[test]
+    fn resolve_config_path_empty_xdg_falls_back_to_home() {
+        // XDG: an exported-but-empty XDG_CONFIG_HOME == unset.
+        let p = resolve_config_path(Some(OsStr::new("")), Some(OsStr::new("/home/u")));
+        assert_eq!(
+            p,
+            Some(PathBuf::from("/home/u/.config/hayate-kit-settings/config.json"))
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_relative_xdg_is_ignored() {
+        // XDG: a relative XDG_CONFIG_HOME must be ignored, not used as a base.
+        let p = resolve_config_path(Some(OsStr::new("foo")), Some(OsStr::new("/home/u")));
+        assert_eq!(
+            p,
+            Some(PathBuf::from("/home/u/.config/hayate-kit-settings/config.json"))
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_no_xdg_uses_home() {
+        let p = resolve_config_path(None, Some(OsStr::new("/home/u")));
+        assert_eq!(
+            p,
+            Some(PathBuf::from("/home/u/.config/hayate-kit-settings/config.json"))
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_home_unset_returns_none() {
+        assert_eq!(resolve_config_path(None, None), None);
+    }
+
+    #[test]
+    fn resolve_config_path_relative_xdg_and_home_unset_returns_none() {
+        // Relative XDG ignored + no HOME → no valid absolute base at all.
+        assert_eq!(resolve_config_path(Some(OsStr::new("foo")), None), None);
+    }
+
+    #[test]
+    fn resolve_config_path_empty_home_returns_none() {
+        // Empty HOME treated as unset (consistent with the empty-XDG rule),
+        // not a CWD-relative `.config`.
+        assert_eq!(resolve_config_path(None, Some(OsStr::new(""))), None);
+    }
 
     // ── existing baseline test (preserved) ──────────────────────────────
 
